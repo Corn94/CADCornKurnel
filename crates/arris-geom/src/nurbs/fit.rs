@@ -267,6 +267,21 @@ fn fit<const D: usize>(
             )));
         }
     }
+    // `f` at each sample parameter, kept across the refinement: a span
+    // that is not split keeps its samples to the bit, so each is asked of
+    // `f` once (for a pcurve, a projection onto the surface each), not once
+    // per round.
+    let memo: core::cell::RefCell<std::collections::HashMap<u64, OPoint<f64, Const<D>>>> =
+        core::cell::RefCell::new(std::collections::HashMap::new());
+    let remembered = |t: f64| -> OPoint<f64, Const<D>> {
+        if let Some(&q) = memo.borrow().get(&t.to_bits()) {
+            return q;
+        }
+        let q = f(t);
+        memo.borrow_mut().insert(t.to_bits(), q);
+        q
+    };
+    let f: &dyn Fn(f64) -> OPoint<f64, Const<D>> = &remembered;
     let mut breaks: Vec<f64> = (0..=INITIAL_SPANS)
         .map(|i| range.lerp(i as f64 / INITIAL_SPANS as f64))
         .collect();

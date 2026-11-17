@@ -276,12 +276,20 @@ pub fn pcurve_on(
             )
         }
         Surface::Nurbs(nurbs) => {
-            // The distance is the global projection's: a NURBS surface has
-            // no closed form, and a local one could call a curve on a fold
-            // of the surface off it.
+            // The distance is the global projection's wherever it matters:
+            // a NURBS surface has no closed form, and a local one could call
+            // a curve on a fold of the surface off it. Each sample is hinted
+            // by the last, and a hinted answer within the tolerance is taken
+            // (`project_near`): the global one is no farther, so the verdict
+            // is the same, and a sample past the tolerance is searched
+            // globally.
             let mut fault = None;
-            check_on(curve, range, surface, tol, |p| match nurbs.project(p) {
-                Ok(near) => near.distance,
+            let hint = core::cell::Cell::new(None);
+            check_on(curve, range, surface, tol, |p| match nurbs.project_near(p, hint.get(), tol.linear) {
+                Ok(near) => {
+                    hint.set(Some(near.uv));
+                    near.distance
+                }
                 Err(e) => {
                     fault.get_or_insert(e);
                     f64::NAN

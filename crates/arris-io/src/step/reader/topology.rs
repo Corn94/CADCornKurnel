@@ -1330,10 +1330,23 @@ fn fitted(
 /// [`PCURVE_SAMPLES`] a fit is checked at, each peak past `floor` climbed
 /// to its top ([`worst_gap`]). A parameter whose point does not project
 /// counts as on the surface, and the fit that follows says otherwise.
+///
+/// Each projection is hinted by the one before (`Surface::project_near`),
+/// a hinted answer taken at or below `floor`: the global one is no
+/// farther, and below the floor a gap counts only as the floor. A sample
+/// past it is searched globally, so a gap that matters is the global
+/// projection's.
 fn off_surface(curve: &Curve, range: Interval, surface: &Surface, floor: f64) -> f64 {
     let ts = range.samples(PCURVE_SAMPLES + 1);
+    let hint = core::cell::Cell::new(None);
     worst_gap(&ts, floor, |t| {
-        surface.project(curve.point(t)).map_or(0.0, |p| p.distance)
+        match surface.project_near(curve.point(t), hint.get(), floor) {
+            Ok(p) => {
+                hint.set(Some(p.uv));
+                p.distance
+            }
+            Err(_) => 0.0,
+        }
     })
 }
 

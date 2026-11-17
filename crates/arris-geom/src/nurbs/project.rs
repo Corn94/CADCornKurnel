@@ -74,6 +74,34 @@ const SUFFICIENT_DECREASE: f64 = 1e-4;
 /// Halvings of a Newton step that fails to decrease the distance.
 const MAX_BACKTRACKS: usize = 40;
 
+/// A Bézier patch of a surface as the projection's cache keeps it: the
+/// patch, the surface's point at its middle, which the search starts its
+/// best distance from, and the box of its control points, the cheapest
+/// lower bound on its distance from a query.
+pub(crate) struct CachedPatch {
+    pub(crate) patch: Patch,
+    pub(crate) middle: Point3,
+    hull: [[f64; 3]; 2],
+}
+
+/// What the projection keeps of a surface between queries
+/// ([`NurbsSurface::search_cache`]): its patches, and the two scales every
+/// query was computing from all its control points — the diagonal of their
+/// box, and the largest magnitude among them.
+pub(crate) struct SearchCache {
+    pub(crate) patches: Vec<CachedPatch>,
+    extent: f64,
+    magnitude: f64,
+}
+
+/// How far `p` is from the box `[lo, hi]`: zero inside it.
+fn box_distance(b: &[[f64; 3]; 2], p: Point3) -> f64 {
+    (0..3)
+        .map(|k| real::powi((b[0][k] - p[k]).max(p[k] - b[1][k]).max(0.0), 2))
+        .sum::<f64>()
+        .sqrt()
+}
+
 /// One Bézier patch, in homogeneous coordinates `(w·P, w)`, over a box of
 /// the surface's parameters.
 #[derive(Clone)]
@@ -120,20 +148,16 @@ impl Patch {
     /// subdivision ends in, which is what lets a flat valley's neighbours be
     /// pruned instead of visited.
     fn lower_bound(&self, p: Point3) -> f64 {
-        let points: Vec<Vec3> = self
-            .net
-            .iter()
-            .map(|h| Vec3::from(Self::cartesian(h)))
-            .collect();
+        let point = |h: &Vector4<f64>| Vec3::from(Self::cartesian(h));
         let [lo, hi] = self.hull_box();
         let mut bound = (0..3)
             .map(|k| real::powi((lo[k] - p[k]).max(p[k] - hi[k]).max(0.0), 2))
             .sum::<f64>()
             .sqrt();
-        let centre = points.iter().sum::<Vec3>() / points.len() as f64;
+        let centre = self.net.iter().map(point).sum::<Vec3>() / self.net.len() as f64;
         let toward = p.coords - centre;
         let (rows, cols) = (self.degree[0] + 1, self.degree[1] + 1);
-        let corner = |a: usize, b: usize| points[a * cols + b];
+        let corner = |a: usize, b: usize| point(&self.net[a * cols + b]);
         let across_u =
             corner(rows - 1, 0) + corner(rows - 1, cols - 1) - corner(0, 0) - corner(0, cols - 1);
         let across_v =
@@ -143,9 +167,8 @@ impl Patch {
                 continue;
             };
             let n = if n.dot(&toward) < 0.0 { -n } else { n };
-            let support = points
-                .iter()
-                .map(|q| n.dot(&(p.coords - q)))
+            let support = (self.net.iter())
+                .map(|h| n.dot(&(p.coords - point(h))))
                 .fold(f64::INFINITY, f64::min);
             bound = bound.max(support);
         }
@@ -309,6 +332,41 @@ impl Ord for Queued {
 }
 
 impl NurbsSurface {
+    /// The surface's [`SearchCache`]: [`NurbsSurface::patches`] with each
+    /// patch's middle point and box, and the surface's scales, computed on
+    /// the first call and kept with the surface after it.
+    pub(crate) fn search_cache(&self) -> &SearchCache {
+        self.cache.get_or_init(|| {
+            let patches = (self.patches().into_iter())
+                .map(|patch| {
+                    let [u, v] = patch.middle();
+                    let middle = self.eval(u, v).point;
+                    let hull = patch.hull_box();
+                    CachedPatch { patch, middle, hull }
+                })
+                .collect();
+            let mut lo = [f64::INFINITY; 3];
+            let mut hi = [f64::NEG_INFINITY; 3];
+            let mut magnitude: f64 = 0.0;
+            for x in self.control_points() {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(x[k]);
+                    hi[k] = hi[k].max(x[k]);
+                }
+                magnitude = magnitude.max(x.coords.norm());
+            }
+            let extent = (0..3)
+                .map(|k| real::powi(hi[k] - lo[k], 2))
+                .sum::<f64>()
+                .sqrt();
+            SearchCache {
+                patches,
+                extent,
+                magnitude,
+            }
+        })
+    }
+
     /// The Bézier patches of the surface: one per pair of non-empty knot
     /// spans, in row-major order over `u`. Unclamped knots are read as they
     /// are — a periodic direction's patches are the ones inside its
@@ -398,6 +456,16 @@ impl NurbsSurface {
     /// assert!((edge.point - Point3::new(1.0, 0.5, 0.0)).norm() < 1e-12);
     /// ```
     pub fn project(&self, p: Point3) -> Result<SurfaceProjection, GeomError> {
+        self.project_within(p, f64::INFINITY)
+    }
+
+    /// [`NurbsSurface::project`] knowing that some point of the surface is
+    /// `within` of `p`: the search's best distance starts there, so every
+    /// patch whose lower bound is past it is pruned before it is visited.
+    /// The answer is the unseeded search's — the nearest point is no
+    /// farther than any point of the surface, so its patch is never one
+    /// pruned — reached by visiting only the patches near enough to hold it.
+    fn project_within(&self, p: Point3, within: f64) -> Result<SurfaceProjection, GeomError> {
         if !p.coords.iter().all(|c| c.is_finite()) {
             return Err(GeomError::Degenerate {
                 kind: GeomKind::Point,
@@ -409,33 +477,16 @@ impl NurbsSurface {
             locus: AmbiguousLocus::MedialAxis,
             point: p,
         };
-        let patches = self.patches();
+        let cache = self.search_cache();
+        let patches = &cache.patches;
         // The surface's size, for the leaf; the magnitude of every
         // coordinate that enters a distance, for what is equal to rounding.
-        let (extent, reach) = {
-            let mut lo = [f64::INFINITY; 3];
-            let mut hi = [f64::NEG_INFINITY; 3];
-            let mut reach = p.coords.norm();
-            for x in self.control_points() {
-                for k in 0..3 {
-                    lo[k] = lo[k].min(x[k]);
-                    hi[k] = hi[k].max(x[k]);
-                }
-                reach = reach.max(x.coords.norm());
-            }
-            (
-                (0..3)
-                    .map(|k| real::powi(hi[k] - lo[k], 2))
-                    .sum::<f64>()
-                    .sqrt(),
-                reach,
-            )
-        };
+        let (extent, reach) = (cache.extent, cache.magnitude.max(p.coords.norm()));
         let slack = RELATIVE_ROUNDING * reach;
 
         let mut queue = BinaryHeap::new();
         let mut seq = 0;
-        let mut best = f64::INFINITY;
+        let mut best = within;
         let mut push = |queue: &mut BinaryHeap<Queued>, best: &mut f64, patch: Patch| {
             let [u, v] = patch.middle();
             *best = best.min((self.eval(u, v).point - p).norm());
@@ -445,8 +496,18 @@ impl NurbsSurface {
                 seq += 1;
             }
         };
-        for patch in patches {
-            push(&mut queue, &mut best, patch);
+        // The cached patches' middles are already evaluated: the best
+        // distance starts from all of them before any is bounded, so a
+        // patch is only cloned into the queue once it survives.
+        for c in patches {
+            best = best.min((c.middle - p).norm());
+        }
+        for c in patches {
+            // The box's distance is at most the full bound: a patch it puts
+            // past the best is pruned without the rest of the bound.
+            if box_distance(&c.hull, p) <= best + slack && c.patch.lower_bound(p) <= best + slack {
+                push(&mut queue, &mut best, c.patch.clone());
+            }
         }
 
         let mut found: Vec<Candidate> = Vec::new();
@@ -522,6 +583,43 @@ impl NurbsSurface {
         })
     }
 
+    /// [`NurbsSurface::project`], started from a nearby parameter where one
+    /// is known: the local minimum Newton's iteration reaches from `hint`
+    /// ([`NurbsSurface::project_from`]) where it is within `accept` of `p`,
+    /// and the global search otherwise. What a caller walking a curve along
+    /// the surface wants, one sample after another, each hinted by the last.
+    ///
+    /// A local minimum within `accept` is the answer the global search would
+    /// give unless the surface comes back within `accept` of `p` somewhere
+    /// else — folds onto itself to within that distance — since no point of
+    /// the surface is nearer than the global minimum: a curve on the surface
+    /// is never called off it by the hint, and one off it by more than
+    /// `accept` gets the global search's answer, searched only over the
+    /// patches that could be nearer than the local minimum. The parameter
+    /// is the
+    /// local iteration's where it is taken: continuous with `hint` across a
+    /// closed direction's seam, where the global search reports it inside
+    /// the domain.
+    pub fn project_near(
+        &self,
+        p: Point3,
+        hint: Option<Point2>,
+        accept: f64,
+    ) -> Result<SurfaceProjection, GeomError> {
+        if let Some(h) = hint.filter(|h| h.x.is_finite() && h.y.is_finite()) {
+            let local = self.project_from(p, h);
+            if local.distance <= accept {
+                return Ok(local);
+            }
+            // Past `accept`, the global answer — but the local minimum is a
+            // point of the surface that near, which bounds the search.
+            if local.distance.is_finite() {
+                return self.project_within(p, local.distance);
+            }
+        }
+        self.project(p)
+    }
+
     /// The local minimum of the distance to `p` that Newton's iteration
     /// reaches from `start`, across knot spans and, in a direction the
     /// surface closes in ([`NurbsSurface::closure`]), across its seam
@@ -534,11 +632,7 @@ impl NurbsSurface {
     pub(crate) fn project_from(&self, p: Point3, start: Point2) -> SurfaceProjection {
         let domain = self.domain();
         let closure = self.closure();
-        let reach = self
-            .control_points()
-            .iter()
-            .map(|x| x.coords.norm())
-            .fold(p.coords.norm(), f64::max);
+        let reach = self.search_cache().magnitude.max(p.coords.norm());
         let hold = |k: usize, x: f64| match closure[k] {
             Some(_) => x,
             None => x.clamp(domain[k].lo(), domain[k].hi()),

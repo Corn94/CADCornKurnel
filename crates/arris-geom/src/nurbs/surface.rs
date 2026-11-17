@@ -53,6 +53,48 @@ pub struct NurbsSurface {
     period: [Option<f64>; 2],
     /// Whether each direction is closed and not periodic.
     closed: [bool; 2],
+    /// The Bézier patches the projection searches, extracted on first use
+    /// and kept: they depend on the surface alone, and extracting them is
+    /// most of a projection's cost on a surface of many spans.
+    pub(super) cache: PatchCache,
+}
+
+/// What the projection keeps of a surface between queries, filled once
+/// ([`NurbsSurface::search_cache`]). Not part of the surface's value:
+/// every cache compares equal, a clone shares what its original has
+/// filled, and a surface moved, mirrored or transposed starts empty.
+#[derive(Default)]
+pub(crate) struct PatchCache(std::sync::OnceLock<std::sync::Arc<super::project::SearchCache>>);
+
+impl Clone for PatchCache {
+    fn clone(&self) -> Self {
+        let copy = PatchCache::default();
+        if let Some(filled) = self.0.get() {
+            let _ = copy.0.set(filled.clone());
+        }
+        copy
+    }
+}
+
+impl PartialEq for PatchCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl core::fmt::Debug for PatchCache {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(if self.0.get().is_some() { "PatchCache(filled)" } else { "PatchCache(empty)" })
+    }
+}
+
+impl PatchCache {
+    pub(crate) fn get_or_init(
+        &self,
+        fill: impl FnOnce() -> super::project::SearchCache,
+    ) -> &super::project::SearchCache {
+        self.0.get_or_init(|| std::sync::Arc::new(fill()))
+    }
 }
 
 /// The wire form of a [`NurbsSurface`]: what [`NurbsSurface::new`] takes,
@@ -187,6 +229,7 @@ impl NurbsSurface {
             weights,
             period,
             closed,
+            cache: PatchCache::default(),
         })
     }
 
@@ -539,6 +582,7 @@ impl NurbsSurface {
             weights: order.iter().map(|&i| self.weights[i]).collect(),
             period: [self.period[1], self.period[0]],
             closed: [self.closed[1], self.closed[0]],
+            cache: PatchCache::default(),
         }
     }
 
@@ -622,6 +666,7 @@ impl NurbsSurface {
             weights: self.weights.clone(),
             period: self.period,
             closed: self.closed,
+            cache: PatchCache::default(),
         }
     }
 
@@ -637,6 +682,7 @@ impl NurbsSurface {
             weights: self.weights.clone(),
             period: self.period,
             closed: self.closed,
+            cache: PatchCache::default(),
         }
     }
 }

@@ -47,6 +47,22 @@ fn local_noise_scale(frame: &Frame, p: Point3) -> f64 {
 }
 
 impl Surface {
+    /// [`Surface::project`], hinted: on a NURBS surface,
+    /// [`NurbsSurface::project_near`] from `hint` with `accept`; on an
+    /// analytic surface, whose projection is closed form, the projection
+    /// itself, the hint unused.
+    pub fn project_near(
+        &self,
+        p: Point3,
+        hint: Option<Point2>,
+        accept: f64,
+    ) -> Result<SurfaceProjection, GeomError> {
+        match self {
+            Surface::Nurbs(s) => s.project_near(p, hint, accept),
+            _ => self.project(p),
+        }
+    }
+
     /// The nearest point of the surface to `p` with its `(u, v)`, by the
     /// closed form of each variant: the point is exact to rounding, never
     /// the result of an iteration, and the parameters are the

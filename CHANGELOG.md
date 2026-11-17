@@ -21,6 +21,15 @@ into its version (ADR-0027).
   solid's rather than taken from it.
 - **Breaking**: `SplineFault` has two new variants, `RestartPeriodic` and
   `NotClosed`. Fix: a `match` on it that lists every variant adds the two.
+- Reading STEP parts with B-spline surfaces is 2 to 7 times faster (a part
+  with a 722-span surface: from over ten minutes to 83 s). A surface keeps
+  what projection needs of it between queries (its Bézier patches, their
+  boxes and middles, its scales); `NurbsSurface::project_near` and
+  `Surface::project_near` (new) project a point from a nearby parameter,
+  falling back to the global search, seeded with the local distance, past
+  a caller's `accept`; the pcurve fit and the reader's gap check walk their
+  samples with it; a fit keeps its samples across refinement rounds. What
+  is read is unchanged.
 
 ## 0.11.1 — 2026-11-16
 

@@ -186,6 +186,7 @@ pub(super) fn fitted_on(
     let (ends, passes) = singular_ends(curve, range, surface, tol)?;
     let origin = surface.frame().map_or(0.0, |f| f.origin().coords.norm());
     let band = PCURVE_SINGULAR_BAND * tol.linear;
+    let last: core::cell::Cell<Option<Point2>> = core::cell::Cell::new(None);
     let raw = |t: f64| -> Result<Point2, GeomError> {
         let mut p = curve.point(t);
         // An end is read on its own side of the range only: a closed curve
@@ -211,7 +212,12 @@ pub(super) fn fitted_on(
                 return Ok(end.uv);
             }
         }
-        let uv = surface.project(p)?.uv;
+        // Hinted by the sample before (`project_near`): consecutive samples
+        // are near on the surface, and a hinted answer within the tolerance
+        // is the global one, continuous with the hint across a seam, which
+        // the unwrapping below reads the same as the global one's.
+        let uv = surface.project_near(p, last.get(), tol.linear)?.uv;
+        last.set(Some(uv));
         // A cylinder's `u` as `atan2` gives it rather than wrapped into
         // the turn: the unwrapping puts the turns back either way, and
         // wrapping first costs the last bit of a negative angle, which
