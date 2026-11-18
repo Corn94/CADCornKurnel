@@ -160,6 +160,16 @@ impl fmt::Debug for Meter<'_> {
     }
 }
 
+impl Meter<'_> {
+    /// Whether the meter can never stop: no poll and no budget, as
+    /// [`Control::NONE`] makes it. What lets a caller split the work
+    /// across threads, each with a meter of its own, without changing
+    /// what a stop would have stopped.
+    pub fn is_unbounded(&self) -> bool {
+        self.poll.is_none() && self.cap.is_none()
+    }
+}
+
 impl Default for Meter<'_> {
     /// A meter that never stops: [`Control::NONE`]'s.
     fn default() -> Self {

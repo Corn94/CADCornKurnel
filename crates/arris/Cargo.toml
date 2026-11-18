@@ -13,7 +13,7 @@ readme.workspace = true
 [features]
 default = ["serde"]
 serde = ["arris-topo/serde", "arris-io/serde"]
-parallel = ["arris-ops/parallel", "arris-mesh/parallel"]
+parallel = ["arris-ops/parallel", "arris-mesh/parallel", "arris-io/parallel"]
 paranoid = ["arris-ops/paranoid"]
 
 [dependencies]

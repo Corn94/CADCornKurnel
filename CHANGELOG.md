@@ -30,6 +30,14 @@ into its version (ADR-0027).
   a caller's `accept`; the pcurve fit and the reader's gap check walk their
   samples with it; a fit keeps its samples across refinement rounds. What
   is read is unchanged.
+- With the `parallel` feature (`arris/parallel` turns it on), a STEP read
+  that cannot be stopped (`Control::NONE`) builds its solids over rayon,
+  each in a model of its own, and imports them in the file's order: the
+  same solids, measures, refusals and provenance as a sequential read, and
+  the same ids on every run whatever the number of threads. Those ids are
+  not a sequential read's, which keeps values a build made and did not use;
+  a read with a poll or a budget is sequential as before.
+- `Meter::is_unbounded` (new): whether a meter can never stop.
 
 ## 0.11.1 — 2026-11-16
 

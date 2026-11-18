@@ -651,7 +651,8 @@ fn read_solids(
     for p in &flat.placed {
         index.insert((p.solid, p.instance), index.len());
     }
-    for p in &flat.placed {
+    let mut ahead = built_ahead(model, &flat.placed, &refused, entities, options, meter);
+    for (k, p) in flat.placed.iter().enumerate() {
         meter.tick()?;
         let entity = FileEntity {
             id: p.solid,
@@ -678,12 +679,17 @@ fn read_solids(
                     "no representation holds the solid, so it has no units",
                 )),
                 (Some(Err(r)), _) | (Some(Ok(_)), Err(r)) => Err(r),
-                (Some(Ok(units)), Ok(motion)) => match (Geometry {
-                    entities,
-                    units: units.placed(motion),
-                }
-                .solid(model, p.solid, p.instance, options.heal, meter))
-                {
+                (Some(Ok(units)), Ok(motion)) => match ahead
+                    .get_mut(k)
+                    .and_then(Option::take)
+                    .map(|built| imported(model, p.solid, built))
+                    .unwrap_or_else(|| {
+                        Geometry {
+                            entities,
+                            units: units.placed(motion),
+                        }
+                        .solid(model, p.solid, p.instance, options.heal, meter)
+                    }) {
                     Ok(s) => Ok(ReadBody {
                         body: s.body,
                         provenance: s.provenance,
@@ -705,6 +711,100 @@ fn read_solids(
     Ok(Read {
         solids: out,
         products,
+    })
+}
+
+/// A solid built ahead of the read's loop, in a model of its own, or the
+/// refusal its build ended in.
+type Ahead = Result<(Model, topology::Solid), Refusal>;
+
+/// Every placed solid the reader builds, built ahead over rayon, each in a
+/// model of its own with `model`'s precision — where the `parallel` feature
+/// is on and `meter` can never stop the read, since a stop has to land
+/// where a sequential read's would. Indexed as `placed`; a solid the loop
+/// refuses without building it, or one whose units or placement do not
+/// read, is `None` and left to the loop. Empty otherwise: the loop builds
+/// every solid itself.
+#[cfg(feature = "parallel")]
+fn built_ahead(
+    model: &Model,
+    placed: &[assembly::Placed],
+    refused: &BTreeSet<u64>,
+    entities: Entities<'_>,
+    options: &ReadOptions,
+    meter: &Meter<'_>,
+) -> Vec<Option<Ahead>> {
+    use rayon::prelude::*;
+    if !meter.is_unbounded() || placed.len() < 2 {
+        return Vec::new();
+    }
+    let precision = model.precision();
+    placed
+        .par_iter()
+        .map(|p| {
+            if refused.contains(&p.solid) {
+                return None;
+            }
+            let units = Units::of_context(&entities, p.context?, options.length_unit).ok()?;
+            let motion = p.motion.clone().ok()?;
+            let mut scratch = Model::new(precision).ok()?;
+            let mut own = Meter::new(&Control::NONE);
+            let geometry = Geometry {
+                entities,
+                units: units.placed(motion),
+            };
+            match geometry.solid(&mut scratch, p.solid, p.instance, options.heal, &mut own) {
+                Ok(solid) => Some(Ok((scratch, solid))),
+                Err(Halt::Refused(refusal)) => Some(Err(refusal)),
+                Err(Halt::Interrupted(_)) => None,
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "parallel"))]
+fn built_ahead(
+    _: &Model,
+    _: &[assembly::Placed],
+    _: &BTreeSet<u64>,
+    _: Entities<'_>,
+    _: &ReadOptions,
+    _: &Meter<'_>,
+) -> Vec<Option<Ahead>> {
+    Vec::new()
+}
+
+/// A solid built ahead, imported into `model`: its body copied with every
+/// entity and value it reaches, its provenance and healing record moved to
+/// the copy's ids. The ids are the import's, in the file's order of solids
+/// whatever the order they were built in — the same for every run and every
+/// number of threads, though not those of a sequential build, which keeps
+/// in the model the values a build made and did not use.
+fn imported(model: &mut Model, solid: u64, built: Ahead) -> Result<topology::Solid, Halt> {
+    let (scratch, built) = built.map_err(Halt::Refused)?;
+    let (body, map) = model.import(&scratch, built.body).map_err(|e| {
+        Halt::Refused(Refusal::Topology {
+            entity: solid,
+            what: format!("the solid built ahead does not import: {e}"),
+        })
+    })?;
+    let healing = Healing {
+        grown: (built.healing.grown.into_iter())
+            .filter_map(|g| {
+                Some(Grown {
+                    entity: map.map_entity(g.entity)?,
+                    ..g
+                })
+            })
+            .collect(),
+        turned: (built.healing.turned.iter())
+            .filter_map(|f| map.faces.get(f).copied())
+            .collect(),
+    };
+    Ok(topology::Solid {
+        body,
+        provenance: built.provenance.mapped(&map),
+        healing,
     })
 }
 
