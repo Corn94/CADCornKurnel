@@ -38,6 +38,25 @@ into its version (ADR-0027).
   not a sequential read's, which keeps values a build made and did not use;
   a read with a poll or a budget is sequential as before.
 - `Meter::is_unbounded` (new): whether a meter can never stop.
+- A NURBS surface's projection finds the patches near a point through a
+  tree of boxes over them, built with the surface's search cache, instead
+  of bounding every patch: the same patches, in the same order, so the
+  same answer; a few times fewer patches visited on a surface of hundreds.
+- A fast STEP read: `ReadOptions::check` (`ReadCheck::Full`, the default,
+  or `ReadCheck::Fast`) and `ReadOptions::check_for`, which reads chosen
+  solids, by file entity, otherwise than the rest. A fast read measures
+  gaps at the checker's samples only, climbs no peak between them and fits
+  pcurves to `FAST_FIT_FACTOR` (1000) times the default tolerance, the
+  edges' tolerances grown to what it measures; its bodies pass the checker.
+  A solid it refuses for anything but a gap past the cap is read again in
+  full. `ReadBody::check` records which read each body got. NIST's FTC-07
+  reads in a quarter of the time, its volume within 1e-12 of the full read's.
+- `body::read_checked` (new): `body::read` with the checker at a level the
+  caller chooses, `Level::Fast` for bytes its own application wrote; a
+  part that takes seconds to read from STEP reads back in milliseconds.
+- **Breaking**: `ReadOptions` has the fields `check` and `check_for`, and
+  `ReadBody` the field `check`. Fix: a `ReadOptions { .. }` literal ends in
+  `..ReadOptions::default()`; a `ReadBody` literal adds `check`.
 
 ## 0.11.1 — 2026-11-16
 

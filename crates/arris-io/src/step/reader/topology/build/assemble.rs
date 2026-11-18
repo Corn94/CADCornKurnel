@@ -48,7 +48,7 @@ impl Build<'_, '_> {
         walked: Vec<Vec<Walked>>,
     ) -> Result<(Assembly, Tolerances), Refusal> {
         let precision = self.precision;
-        let mut gaps = Gaps::new(self.points.len());
+        let mut gaps = Gaps::new(self.points.len(), self.fast);
         let mut shells = Vec::with_capacity(walked.len());
         // Each face's surface, and each edge's uses on them, for where
         // the faces an edge bounds meet.

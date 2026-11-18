@@ -228,6 +228,7 @@ impl Build<'_, '_> {
                         &w.surface,
                         precision,
                         read_cap,
+                        self.fast,
                         self.meter,
                     ) {
                         Err(fault) if cap > read_cap && fault.heals() => fitted(
@@ -236,6 +237,7 @@ impl Build<'_, '_> {
                             &w.surface,
                             precision,
                             cap,
+                            self.fast,
                             self.meter,
                         ),
                         first => first,

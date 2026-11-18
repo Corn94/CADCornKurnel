@@ -55,7 +55,57 @@ pub struct ReadOptions {
     /// What the reader heals (ADR-0058): on by default, as Open
     /// CASCADE's reader heals every read.
     pub heal: Heal,
+    /// How thoroughly each solid is measured as it is read
+    /// ([`ReadCheck`]): [`ReadCheck::Full`] by default.
+    pub check: ReadCheck,
+    /// Solids read otherwise than [`check`](ReadOptions::check) says, by
+    /// the `#id` of their file entity (a `MANIFOLD_SOLID_BREP`, say): a
+    /// part to read fast in an assembly read in full, or the reverse.
+    pub check_for: BTreeMap<u64, ReadCheck>,
 }
+
+impl ReadOptions {
+    /// How the solid of file entity `solid` is to be read: its entry in
+    /// [`check_for`](ReadOptions::check_for), else
+    /// [`check`](ReadOptions::check).
+    pub fn check_of(&self, solid: u64) -> ReadCheck {
+        self.check_for.get(&solid).copied().unwrap_or(self.check)
+    }
+}
+
+/// How thoroughly the reader measures a solid. Either way the body passes
+/// the checker and its tolerances cover every gap measured; they differ
+/// in how many points are measured and how closely each pcurve is fitted.
+///
+/// ```
+/// use arris_io::step::{ReadCheck, ReadOptions};
+///
+/// let mut options = ReadOptions { check: ReadCheck::Fast, ..ReadOptions::default() };
+/// options.check_for.insert(17, ReadCheck::Full);
+/// assert_eq!(options.check_of(17), ReadCheck::Full);
+/// assert_eq!(options.check_of(18), ReadCheck::Fast);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ReadCheck {
+    /// Every gap measured at the checker's samples and at the ones a
+    /// pcurve fit is held to, each peak climbed to its top, and every
+    /// pcurve fitted to the model's default tolerance where the file
+    /// allows: the reader's own standard.
+    #[default]
+    Full,
+    /// Gaps measured at the checker's samples only, no peak climbed, and
+    /// pcurves fitted to [`FAST_FIT_FACTOR`] times the default tolerance
+    /// (at most the gap cap), the edges' tolerances grown to what is
+    /// measured. Faster on free-form parts; a body for which a coarse
+    /// figure is enough (a clearance check, a preview). A solid the fast
+    /// read refuses is read again in full, and its [`ReadBody::check`]
+    /// says so.
+    Fast,
+}
+
+/// The factor a [`ReadCheck::Fast`] read fits pcurves to, over the model's
+/// default tolerance: `1e-4` of a length unit at Arris's `1e-7`.
+pub const FAST_FIT_FACTOR: f64 = 1000.0;
 
 /// What the reader heals (ADR-0058). Healing never moves geometry and
 /// never heals silently: what it did is the [`ReadBody::healing`] record.
@@ -551,6 +601,10 @@ pub struct ReadBody {
     pub provenance: Provenance,
     /// What the read healed in it: empty unless the file needed it.
     pub healing: Healing,
+    /// How it was read: what [`ReadOptions::check_of`] asked, or
+    /// [`ReadCheck::Full`] where a fast read refused it and the full one
+    /// did not.
+    pub check: ReadCheck,
 }
 
 /// The entity names of the solids the reader reads.
@@ -684,16 +738,17 @@ fn read_solids(
                     .and_then(Option::take)
                     .map(|built| imported(model, p.solid, built))
                     .unwrap_or_else(|| {
-                        Geometry {
+                        let geometry = Geometry {
                             entities,
                             units: units.placed(motion),
-                        }
-                        .solid(model, p.solid, p.instance, options.heal, meter)
+                        };
+                        read_solid(&geometry, model, p, options, meter)
                     }) {
-                    Ok(s) => Ok(ReadBody {
+                    Ok((s, check)) => Ok(ReadBody {
                         body: s.body,
                         provenance: s.provenance,
                         healing: s.healing,
+                        check,
                     }),
                     Err(Halt::Refused(refusal)) => Err(refusal),
                     Err(Halt::Interrupted(stop)) => return Err(stop.into()),
@@ -716,7 +771,33 @@ fn read_solids(
 
 /// A solid built ahead of the read's loop, in a model of its own, or the
 /// refusal its build ended in.
-type Ahead = Result<(Model, topology::Solid), Refusal>;
+type Ahead = Result<(Model, topology::Solid, ReadCheck), Refusal>;
+
+/// The solid `p` read into `model` as `options` ask for it: fast where
+/// [`ReadOptions::check_of`] says so, and again in full where the fast
+/// read refuses it for anything but a gap past the cap (the refused
+/// attempt leaves `model` as it was). With the check it was read by.
+fn read_solid(
+    geometry: &Geometry<'_>,
+    model: &mut Model,
+    p: &assembly::Placed,
+    options: &ReadOptions,
+    meter: &mut Meter<'_>,
+) -> Result<(topology::Solid, ReadCheck), Halt> {
+    let check = options.check_of(p.solid);
+    let first = geometry.solid(model, p.solid, p.instance, options.heal, check, meter);
+    match (first, check) {
+        // A gap past the cap is the file's: the full read measures every
+        // point the fast one does and more, so it would refuse it too.
+        (Err(Halt::Refused(refusal)), ReadCheck::Fast) if refusal.kind() == RefusalKind::Gap => {
+            Err(Halt::Refused(refusal))
+        }
+        (Err(Halt::Refused(_)), ReadCheck::Fast) => geometry
+            .solid(model, p.solid, p.instance, options.heal, ReadCheck::Full, meter)
+            .map(|s| (s, ReadCheck::Full)),
+        (first, _) => first.map(|s| (s, check)),
+    }
+}
 
 /// Every placed solid the reader builds, built ahead over rayon, each in a
 /// model of its own with `model`'s precision — where the `parallel` feature
@@ -753,8 +834,8 @@ fn built_ahead(
                 entities,
                 units: units.placed(motion),
             };
-            match geometry.solid(&mut scratch, p.solid, p.instance, options.heal, &mut own) {
-                Ok(solid) => Some(Ok((scratch, solid))),
+            match read_solid(&geometry, &mut scratch, p, options, &mut own) {
+                Ok((solid, check)) => Some(Ok((scratch, solid, check))),
                 Err(Halt::Refused(refusal)) => Some(Err(refusal)),
                 Err(Halt::Interrupted(_)) => None,
             }
@@ -780,8 +861,12 @@ fn built_ahead(
 /// whatever the order they were built in — the same for every run and every
 /// number of threads, though not those of a sequential build, which keeps
 /// in the model the values a build made and did not use.
-fn imported(model: &mut Model, solid: u64, built: Ahead) -> Result<topology::Solid, Halt> {
-    let (scratch, built) = built.map_err(Halt::Refused)?;
+fn imported(
+    model: &mut Model,
+    solid: u64,
+    built: Ahead,
+) -> Result<(topology::Solid, ReadCheck), Halt> {
+    let (scratch, built, check) = built.map_err(Halt::Refused)?;
     let (body, map) = model.import(&scratch, built.body).map_err(|e| {
         Halt::Refused(Refusal::Topology {
             entity: solid,
@@ -801,11 +886,14 @@ fn imported(model: &mut Model, solid: u64, built: Ahead) -> Result<topology::Sol
             .filter_map(|f| map.faces.get(f).copied())
             .collect(),
     };
-    Ok(topology::Solid {
-        body,
-        provenance: built.provenance.mapped(&map),
-        healing,
-    })
+    Ok((
+        topology::Solid {
+            body,
+            provenance: built.provenance.mapped(&map),
+            healing,
+        },
+        check,
+    ))
 }
 
 #[cfg(test)]

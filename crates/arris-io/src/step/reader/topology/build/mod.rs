@@ -36,7 +36,7 @@ use super::{
     stopped_in, through, turned_against_neighbours,
 };
 use crate::step::reader::geometry::{Ball, Geometry};
-use crate::step::reader::{Heal, Refusal};
+use crate::step::reader::{Heal, ReadCheck, Refusal};
 
 /// A face walked: its surface and the loops of uses on it.
 struct Walked {
@@ -56,6 +56,9 @@ struct Build<'a, 'm> {
     solid: u64,
     instance: u32,
     heal: Heal,
+    /// A [`ReadCheck::Fast`] read: looser pcurve fits, gaps at the
+    /// checker's samples.
+    fast: bool,
     precision: Precision,
     tol: Tolerance,
     /// The model's default tolerance.
@@ -92,10 +95,12 @@ impl Geometry<'_> {
         solid: u64,
         instance: u32,
         heal: Heal,
+        check: ReadCheck,
         file: &FileSolid,
         meter: &mut Meter<'_>,
     ) -> Result<Solid, Refusal> {
         let mut build = Build::new(self, model, solid, instance, heal, file, meter)?;
+        build.fast = check == ReadCheck::Fast;
         build.edges()?;
         build.split_at_singular_points()?;
         let mut walked = build.walk_shells()?;
@@ -142,6 +147,7 @@ impl<'a, 'm> Build<'a, 'm> {
             solid,
             instance,
             heal,
+            fast: false,
             precision,
             tol: precision.tolerance(),
             tolerance,

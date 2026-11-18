@@ -299,13 +299,31 @@ pub fn to_json(model: &Model, body: Body, record: &Provenance) -> Result<String,
 /// assert_eq!(body::read(&mut b, &model_bytes, &arris_math::Control::NONE), Err(body::BodyError::Magic));
 /// ```
 pub fn read(model: &mut Model, bytes: &[u8], control: &Control<'_>) -> Result<Imported, BodyError> {
+    read_checked(model, bytes, control, Level::Full)
+}
+
+/// [`read`] with the checker at `level` instead of `Level::Full`. The full
+/// check's global rows (face–face intersection, shell nesting, enclosed
+/// volume) take most of a large body's read; `Level::Fast` keeps the
+/// combinatorial and local geometric rows, linear in the body, which is
+/// what the STEP reader and every operation check. For bytes a caller
+/// trusts — written by its own application from a body that was checked
+/// when it was made — and not for bytes from outside, which is what
+/// [`read`]'s full check is for (ADR-0029 §6). Every other check (the map,
+/// the tolerances, the references) is [`read`]'s.
+pub fn read_checked(
+    model: &mut Model,
+    bytes: &[u8],
+    control: &Control<'_>,
+    level: Level,
+) -> Result<Imported, BodyError> {
     let mut meter = Meter::new(control);
     let rest = bytes.strip_prefix(&BODY_MAGIC).ok_or(BodyError::Magic)?;
     let (version, _): (u32, &[u8]) =
         postcard::take_from_bytes(rest).map_err(|e| BodyError::Decode(e.to_string()))?;
     meter.tick()?;
     let decoded = compat::decode(version, compat::Postcard(rest))?;
-    import(model, decoded, version, &mut meter)
+    import(model, decoded, version, level, &mut meter)
 }
 
 /// The body in `text` ([`to_json()`]'s) imported into `model`, as [`read`]
@@ -344,7 +362,7 @@ pub fn from_json(
         .ok_or_else(|| BodyError::Decode("no version a u32 holds".into()))?;
     meter.tick()?;
     let decoded = compat::decode(version, tree)?;
-    import(model, decoded, version, &mut meter)
+    import(model, decoded, version, Level::Full, &mut meter)
 }
 
 /// `true` when `written` sends distinct writer ids onto exactly `closure`
@@ -448,6 +466,7 @@ fn import(
     model: &mut Model,
     decoded: BodyIn,
     version: u32,
+    level: Level,
     meter: &mut Meter<'_>,
 ) -> Result<Imported, BodyError> {
     let BodyIn {
@@ -466,7 +485,7 @@ fn import(
         check_map(&written, &closure, body)?;
         check_tolerances(m, &scratch, &closure, &written.inverse(), meter)?;
         meter.tick()?;
-        let report = check(m, copy, Level::Full);
+        let report = check(m, copy, level);
         if !report.is_ok() {
             return Err(BodyError::Rejected(Box::new(report)));
         }

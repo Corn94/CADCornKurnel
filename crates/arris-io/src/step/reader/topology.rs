@@ -117,7 +117,7 @@ mod build;
 
 use super::entities::{Args, describe, malformed};
 use super::geometry::{Ball, Geometry, ReadCurve, ReadSurface};
-use super::{Heal, Healing, Refusal};
+use super::{FAST_FIT_FACTOR, Heal, Healing, ReadCheck, Refusal};
 
 /// A solid read: its body and the record naming the file entity each of
 /// its entities was generated from.
@@ -299,6 +299,7 @@ impl Geometry<'_> {
         solid: u64,
         instance: u32,
         heal: Heal,
+        check: ReadCheck,
         meter: &mut Meter<'_>,
     ) -> Result<Solid, Halt> {
         let mut file = self.file_solid(solid)?;
@@ -314,7 +315,7 @@ impl Geometry<'_> {
             let first = inside_out.is_empty();
             let mut found: Vec<usize> = Vec::new();
             let attempt = model.transaction(|m| {
-                let built = self.build(m, solid, instance, heal, &file, meter);
+                let built = self.build(m, solid, instance, heal, check, &file, meter);
                 if let Some(stop) = meter.stopped() {
                     return Err(Attempt::Halt(Halt::Interrupted(stop)));
                 }
@@ -1282,16 +1283,28 @@ impl PcurveFault {
 /// than the cap, as [`PcurveFault::Gap`] with the distance; a fit that
 /// fails even past the cap, as [`PcurveFault::Geom`] with the fit's own
 /// error — a fit, not a gap.
+///
+/// A `fast` fit starts at [`FAST_FIT_FACTOR`] times the default tolerance
+/// (at most `cap`) and measures the curve's distance from the surface at
+/// its samples without climbing a peak.
+#[allow(clippy::too_many_arguments)]
 fn fitted(
     curve: &Curve,
     range: Interval,
     surface: &Surface,
     precision: Precision,
     cap: f64,
+    fast: bool,
     meter: &mut Meter<'_>,
 ) -> Result<Curve2, PcurveFault> {
     let ceiling = GAP_GROWTH * cap;
-    let mut linear = precision.default_tolerance;
+    let mut linear = if fast {
+        (FAST_FIT_FACTOR * precision.default_tolerance)
+            .min(cap)
+            .max(precision.default_tolerance)
+    } else {
+        precision.default_tolerance
+    };
     let mut measured = false;
     loop {
         let tol = Tolerance::new(linear, precision.angular_tolerance);
@@ -1316,7 +1329,7 @@ fn fitted(
             needed
         } else {
             measured = true;
-            let off = off_surface(curve, range, surface, precision.default_tolerance);
+            let off = off_surface(curve, range, surface, precision.default_tolerance, !fast);
             if off > cap {
                 return Err(PcurveFault::Gap(off));
             }
@@ -1336,10 +1349,10 @@ fn fitted(
 /// farther, and below the floor a gap counts only as the floor. A sample
 /// past it is searched globally, so a gap that matters is the global
 /// projection's.
-fn off_surface(curve: &Curve, range: Interval, surface: &Surface, floor: f64) -> f64 {
+fn off_surface(curve: &Curve, range: Interval, surface: &Surface, floor: f64, climb: bool) -> f64 {
     let ts = range.samples(PCURVE_SAMPLES + 1);
     let hint = core::cell::Cell::new(None);
-    worst_gap(&ts, floor, |t| {
+    worst_gap_or_sampled(&ts, floor, climb, |t| {
         match surface.project_near(curve.point(t), hint.get(), floor) {
             Ok(p) => {
                 hint.set(Some(p.uv));
@@ -1361,6 +1374,9 @@ enum Entity {
 /// The gaps measured on the solid's vertices and edges, which their
 /// tolerances are set from (ADR-0025 §4).
 struct Gaps {
+    /// A fast read's ([`ReadCheck::Fast`]): edges measured at the checker's
+    /// samples only, no peak climbed.
+    fast: bool,
     vertex: Vec<f64>,
     /// By edge index: the file's edges, then the rebuilt ones.
     edge: Vec<f64>,
@@ -1388,6 +1404,16 @@ fn worst_gap(ts: &[f64], floor: f64, gap: impl Fn(f64) -> f64) -> f64 {
     worst
 }
 
+/// [`worst_gap`] where `climb`, else the largest of `gap` at `ts` alone:
+/// a fast read's measure, which climbs no peak between samples.
+fn worst_gap_or_sampled(ts: &[f64], floor: f64, climb: bool, gap: impl Fn(f64) -> f64) -> f64 {
+    if climb {
+        worst_gap(ts, floor, gap)
+    } else {
+        ts.iter().map(|&t| gap(t)).fold(0.0, f64::max)
+    }
+}
+
 /// Golden-section steps of [`worst_gap`]'s climb: each shrinks the
 /// bracket by 0.618, so forty take two sample intervals to below `1e-8`
 /// of one, where a smooth peak's value has settled to rounding. An
@@ -1403,8 +1429,9 @@ fn distance(a: Point3, b: Point3) -> f64 {
 }
 
 impl Gaps {
-    fn new(vertices: usize) -> Gaps {
+    fn new(vertices: usize, fast: bool) -> Gaps {
         Gaps {
+            fast,
             vertex: vec![0.0; vertices],
             edge: Vec::new(),
         }
@@ -1470,10 +1497,12 @@ impl Gaps {
                     // fitted pcurve strays as far as the fit allows it,
                     // and a finer look — the mesh's — finds it there.
                     let mut ts = ts;
-                    ts.extend(u.range.samples(PCURVE_SAMPLES + 1));
-                    ts.sort_by(f64::total_cmp);
-                    ts.dedup();
-                    let worst = worst_gap(&ts, precision.default_tolerance, |t| {
+                    if !self.fast {
+                        ts.extend(u.range.samples(PCURVE_SAMPLES + 1));
+                        ts.sort_by(f64::total_cmp);
+                        ts.dedup();
+                    }
+                    let worst = worst_gap_or_sampled(&ts, precision.default_tolerance, !self.fast, |t| {
                         distance(image(t), c.point(t))
                     });
                     self.raise_edge(key, worst);
@@ -1545,10 +1574,12 @@ impl Gaps {
                 distance(at, at + na * l + nb * m)
             };
             let mut ts = range.samples(precision.check_samples);
-            ts.extend(range.samples(PCURVE_SAMPLES + 1));
-            ts.sort_by(f64::total_cmp);
-            ts.dedup();
-            let worst = worst_gap(&ts, precision.default_tolerance, section);
+            if !self.fast {
+                ts.extend(range.samples(PCURVE_SAMPLES + 1));
+                ts.sort_by(f64::total_cmp);
+                ts.dedup();
+            }
+            let worst = worst_gap_or_sampled(&ts, precision.default_tolerance, !self.fast, section);
             self.raise_edge(key, worst);
         }
     }

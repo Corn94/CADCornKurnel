@@ -92,6 +92,143 @@ pub(crate) struct SearchCache {
     pub(crate) patches: Vec<CachedPatch>,
     extent: f64,
     magnitude: f64,
+    /// A tree of boxes over the patches, so a query visits the few near it.
+    index: PatchIndex,
+}
+
+/// A bounding-volume hierarchy over a surface's patches: each node the box
+/// of the patch boxes under it, a leaf a run of at most [`LEAF_PATCHES`]
+/// patch indices. A node no nearer `p` than a distance holds no patch box
+/// nearer — every patch box is inside its leaf's, every node's inside its
+/// parent's — so a query that skips such nodes skips no patch the
+/// exhaustive scan would keep.
+struct PatchIndex {
+    nodes: Vec<IndexNode>,
+    /// The patch indices, grouped so each leaf's are contiguous.
+    order: Vec<usize>,
+}
+
+struct IndexNode {
+    hull: [[f64; 3]; 2],
+    kind: IndexKind,
+}
+
+enum IndexKind {
+    /// `order[start..end]`.
+    Leaf { start: usize, end: usize },
+    Inner { left: usize, right: usize },
+}
+
+/// How many patches a leaf of [`PatchIndex`] holds at most.
+const LEAF_PATCHES: usize = 4;
+
+fn union(a: &[[f64; 3]; 2], b: &[[f64; 3]; 2]) -> [[f64; 3]; 2] {
+    let mut out = *a;
+    for k in 0..3 {
+        out[0][k] = out[0][k].min(b[0][k]);
+        out[1][k] = out[1][k].max(b[1][k]);
+    }
+    out
+}
+
+impl PatchIndex {
+    /// The tree over `hulls`, split at the median of the boxes' centres
+    /// along the longest side of each node's box: deterministic, since
+    /// ties keep the patches' order.
+    fn build(hulls: &[[[f64; 3]; 2]]) -> PatchIndex {
+        let mut index = PatchIndex {
+            nodes: Vec::new(),
+            order: (0..hulls.len()).collect(),
+        };
+        if !hulls.is_empty() {
+            index.node(hulls, 0, hulls.len());
+        }
+        index
+    }
+
+    fn node(&mut self, hulls: &[[[f64; 3]; 2]], start: usize, end: usize) -> usize {
+        let hull = (self.order[start..end].iter())
+            .map(|&i| hulls[i])
+            .reduce(|a, b| union(&a, &b))
+            .unwrap_or([[0.0; 3]; 2]);
+        let at = self.nodes.len();
+        self.nodes.push(IndexNode {
+            hull,
+            kind: IndexKind::Leaf { start, end },
+        });
+        if end - start > LEAF_PATCHES {
+            let axis = (0..3)
+                .max_by(|&a, &b| (hull[1][a] - hull[0][a]).total_cmp(&(hull[1][b] - hull[0][b])))
+                .unwrap_or(0);
+            let centre = |i: usize| hulls[i][0][axis] + hulls[i][1][axis];
+            self.order[start..end].sort_by(|&a, &b| centre(a).total_cmp(&centre(b)).then(a.cmp(&b)));
+            let mid = start + (end - start) / 2;
+            let left = self.node(hulls, start, mid);
+            let right = self.node(hulls, mid, end);
+            self.nodes[at].kind = IndexKind::Inner { left, right };
+        }
+        at
+    }
+
+    /// The least distance from `p` to a patch's middle, at most `within`:
+    /// nearest boxes first, a node farther than the best so far skipped
+    /// (a middle is inside its patch's box).
+    fn nearest_middle(&self, patches: &[CachedPatch], p: Point3, within: f64) -> f64 {
+        let mut best = within;
+        let mut stack = vec![0];
+        if self.nodes.is_empty() {
+            return best;
+        }
+        while let Some(n) = stack.pop() {
+            let node = &self.nodes[n];
+            if box_distance(&node.hull, p) > best {
+                continue;
+            }
+            match node.kind {
+                IndexKind::Leaf { start, end } => {
+                    for &i in &self.order[start..end] {
+                        best = best.min((patches[i].middle - p).norm());
+                    }
+                }
+                IndexKind::Inner { left, right } => {
+                    let (dl, dr) = (
+                        box_distance(&self.nodes[left].hull, p),
+                        box_distance(&self.nodes[right].hull, p),
+                    );
+                    // The nearer child on top of the stack, visited first.
+                    if dl <= dr {
+                        stack.extend([right, left]);
+                    } else {
+                        stack.extend([left, right]);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Every patch whose box is within `reach` of `p`, ascending.
+    fn within(&self, patches: &[CachedPatch], p: Point3, reach: f64) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut stack = vec![0];
+        if self.nodes.is_empty() {
+            return out;
+        }
+        while let Some(n) = stack.pop() {
+            let node = &self.nodes[n];
+            if box_distance(&node.hull, p) > reach {
+                continue;
+            }
+            match node.kind {
+                IndexKind::Leaf { start, end } => out.extend(
+                    (self.order[start..end].iter()).filter(|&&i| box_distance(&patches[i].hull, p) <= reach),
+                ),
+                IndexKind::Inner { left, right } => stack.extend([left, right]),
+            }
+        }
+        out.sort_unstable();
+        out
+    }
 }
 
 /// How far `p` is from the box `[lo, hi]`: zero inside it.
@@ -337,7 +474,7 @@ impl NurbsSurface {
     /// the first call and kept with the surface after it.
     pub(crate) fn search_cache(&self) -> &SearchCache {
         self.cache.get_or_init(|| {
-            let patches = (self.patches().into_iter())
+            let patches: Vec<CachedPatch> = (self.patches().into_iter())
                 .map(|patch| {
                     let [u, v] = patch.middle();
                     let middle = self.eval(u, v).point;
@@ -359,10 +496,12 @@ impl NurbsSurface {
                 .map(|k| real::powi(hi[k] - lo[k], 2))
                 .sum::<f64>()
                 .sqrt();
+            let hulls: Vec<[[f64; 3]; 2]> = patches.iter().map(|c: &CachedPatch| c.hull).collect();
             SearchCache {
                 patches,
                 extent,
                 magnitude,
+                index: PatchIndex::build(&hulls),
             }
         })
     }
@@ -497,15 +636,16 @@ impl NurbsSurface {
             }
         };
         // The cached patches' middles are already evaluated: the best
-        // distance starts from all of them before any is bounded, so a
+        // distance starts from all of them before any is bounded — the
+        // index finds their least without visiting the far ones — so a
         // patch is only cloned into the queue once it survives.
-        for c in patches {
-            best = best.min((c.middle - p).norm());
-        }
-        for c in patches {
-            // The box's distance is at most the full bound: a patch it puts
-            // past the best is pruned without the rest of the bound.
-            if box_distance(&c.hull, p) <= best + slack && c.patch.lower_bound(p) <= best + slack {
+        best = cache.index.nearest_middle(patches, p, best);
+        // The patches whose box is within the best are the index's; the
+        // box's distance is at most the full bound, so no other patch could
+        // survive it. In ascending order, as a scan of them all would push.
+        for i in cache.index.within(patches, p, best + slack) {
+            let c = &patches[i];
+            if c.patch.lower_bound(p) <= best + slack {
                 push(&mut queue, &mut best, c.patch.clone());
             }
         }
