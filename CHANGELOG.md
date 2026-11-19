@@ -8,6 +8,73 @@ into its version (ADR-0027).
 
 ## Unreleased
 
+- Solids that meet along a shared edge can fuse into touching lumps.
+  Each lump keeps its own copy of the contact edge and endpoints, and
+  provenance records every copy. A shared edge within one lump still
+  returns `NonManifold`. Later booleans can cut one lump or join them by
+  covering the whole contact. A join that leaves part of the contact
+  exposed names the two operand edges in the refusal.
+- Fusing solids that share a point can return two touching lumps, each
+  with its own copy of the contact vertex. This includes boxes meeting
+  at a corner and a box touching a cone frustum at its rim. Cutting two
+  crossing cylinders of the same radius keeps separate copies of the
+  crossing vertices on each lump.
+
+- A ball touching a cylinder's end disc or a torus touching a box at a
+  point can fuse as two lumps of one solid. Cutting in either order keeps
+  the target, and the common returns `Empty`. Cutting a spherical cavity
+  that touches its outer wall at a point returns `TangentContact`.
+  A later fuse can join point-touching lumps by covering the contact.
+  If a join leaves the contact exposed, `TangentContact` names both
+  source faces.
+- A plate and cylinder that touch along a ruling cut to their targets
+  in either order. Their common returns `Empty`. `interference` reports
+  a curve for that pair and a point for the ball–disc and torus–box pairs.
+
+- Solids touching from the outside along a curve can fuse to one solid
+  with two lumps. Each lump keeps its own edges and vertices. A fuse that
+  joins the lumps while leaving their contact exposed returns `TangentContact`.
+
+- Booleans of operands tangent to each other now build where they returned a
+  body the checker refuses, or failed with `OpInternalError`: a cylinder
+  tangent inside a wider one, a bar with a boss tangent to each end, a plate
+  whose arc is tangent inside a cylinder, a column tangent to a bore along
+  four lines, a cylinder whose end disc is tangent to another's side, and a
+  tangent ruling a hair off the seams of its cylinders. Each matches its closed
+  form and passes the checker at `full`.
+- `arris_mesh::cdt` accepts a polygon point given twice, so a face whose loop
+  passes one vertex twice (a crescent) meshes. The checker accepts Open
+  CASCADE's crescent written as an outer bound and a hole that meet at a
+  vertex.
+
+- `fillet` and `chamfer` of two rims of one flat face refuse with
+  `BlendTooLarge`, naming both edges and the face, where together they use the
+  face up: a ring's top 4 wide chamfered 2.5 on both rims. It used to return a
+  body the checker refuses, and a boolean on it failed with `OpInternalError`.
+- Booleans that put several pieces of one flat face on a plane no longer refuse
+  as `TangentContact`: a chained fuse of cylinders or boxes standing on a shared
+  end plane, a third slot cut across a cylinder, and a bore cut over a bore of its
+  width (as two tools of one `cut_many`) now build to their closed forms. A curve
+  that one face would hold twice is reported as `OpInternalError`, a fault of the
+  kernel, and `TangentContact` is again said only of two faces that touch along a
+  curve or at an isolated point.
+- `fuse`, `cut`, `common`, their n-ary forms and `interference` accept a body
+  and a body derived from it (its split side, or the sides fused back) as
+  operands. The later operand's untouched entities come back with new ids,
+  recorded as `Modified` from the ones it was given.
+
+- `query::classify_points` classifies a batch of points against a solid in one
+  call: each point gets the answer `classify_point` gives it, in the order given,
+  with a `None` where no ray decided the point, so one grazing point never fails
+  the batch. A budget counts points. A non-finite point fails the whole call
+  (`OpDegenerateError` in Python) before any point is classified, and a body
+  that is not a solid (a sheet, a wire, a general body) is refused as `NotSolid`.
+- Python's `Model.classify_points(body, points)` returns one byte per point: `0`
+  outside, `1` inside, `2` on the boundary, `3` undecided. `points` is a sequence
+  of `(x, y, z)`, or the bytes of little-endian `f64` triples (`bytes`,
+  `bytearray` or `memoryview`), so a numpy array goes in as
+  `a.astype("<f8").tobytes()` and the codes read back with
+  `numpy.frombuffer(out, dtype="i1")`.
 - The STEP reader reads a closed edge on a closed B-spline curve whose one
   vertex is not at the curve's seam: the edge runs once round from its
   vertex, on the curve restarted there (`NurbsCurve::restarted`, new). Such
@@ -111,6 +178,11 @@ into its version (ADR-0027).
   that ended in an internal error (a surface fit out of spans) now builds.
 
 ### Breaking
+
+- `arris_check::Violation` adds `CoincidentVertices { a, b }` (V4). Handle
+  it in exhaustive matches. The boolean result checker reports distinct
+  vertices of one shell that lie within the larger vertex tolerance,
+  allowing the separate ends of a short edge.
 
 - Python's `Model.surface_properties` names its first parameter `entity`, not
   `body`, since it takes a `Body` or a `Face`: pass it positionally, or

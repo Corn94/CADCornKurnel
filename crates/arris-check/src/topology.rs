@@ -242,8 +242,8 @@ impl<'m> Checker<'m> {
     /// L4's faults for `face`'s loops discretised at `chord`. With
     /// `certain`, `None` when an answer is not sure to be the loops' own:
     /// a loop's area, of which a polygon's shoelace area is within its
-    /// deviation times its perimeter, not clear of zero, or a hole's
-    /// first point (on its curve) within twice the deviation of the
+    /// deviation times its perimeter, not clear of zero, or a hole with
+    /// no point (on its curve) farther than twice the deviation from the
     /// polygon it is asked to be inside — so the answer is also the one
     /// a finer polygon gives. A loop of zero area is never decided
     /// coarse.
@@ -470,12 +470,20 @@ impl<'m> Checker<'m> {
         }
     }
 
-    /// S1–S4, shell by shell in closure order.
-    pub(crate) fn shell_rows(&mut self) {
+    /// V4 and S1–S4, shell by shell in closure order.
+    pub(crate) fn shell_rows(&mut self, distinct_vertices: bool) {
         let kind = self.model.body(self.body.id).map(|b| b.kind()).ok();
         for shell_id in self.closure.shells.clone() {
+            let uses = self.shell_edge_uses(shell_id);
+            if distinct_vertices {
+                self.violations.extend(
+                    self.v4_coincident(&uses)
+                        .into_iter()
+                        .map(|[a, b]| Violation::CoincidentVertices { a, b }),
+                );
+            }
             self.s1_faces(shell_id);
-            self.s2_edge_uses(shell_id, kind);
+            self.s2_edge_uses(shell_id, kind, uses);
             self.s3_connected(shell_id);
         }
     }
@@ -503,7 +511,7 @@ impl<'m> Checker<'m> {
     /// The effective orientation of every coedge use of every edge of a
     /// shell: the coedge's composed with the face use's, in the shell's
     /// own stored order.
-    fn shell_edge_uses(&self, shell_id: ShellId) -> BTreeMap<EdgeId, Vec<Orientation>> {
+    pub(crate) fn shell_edge_uses(&self, shell_id: ShellId) -> BTreeMap<EdgeId, Vec<Orientation>> {
         let mut uses: BTreeMap<EdgeId, Vec<Orientation>> = BTreeMap::new();
         let Ok(shell) = self.model.shell(shell_id) else {
             return uses;
@@ -523,14 +531,19 @@ impl<'m> Checker<'m> {
 
     /// S2 (the coedge count and the orientations that pair up, by body
     /// kind) and S4 (a solid's shell is closed).
-    fn s2_edge_uses(&mut self, shell_id: ShellId, kind: Option<BodyKind>) {
+    fn s2_edge_uses(
+        &mut self,
+        shell_id: ShellId,
+        kind: Option<BodyKind>,
+        uses: BTreeMap<EdgeId, Vec<Orientation>>,
+    ) {
         // A wire body has no shell at all (B3); a shell it does carry is
         // not judged by a rule written for faces.
         let Some(kind) = kind.filter(|k| *k != BodyKind::Wire) else {
             return;
         };
         let mut found = Vec::new();
-        for (edge, orientations) in self.shell_edge_uses(shell_id) {
+        for (edge, orientations) in uses {
             // A degenerate edge is a singular point of the surface, not a
             // boundary between two faces: a sphere's pole is used once by
             // the one face that closes on it, and counting it would call
@@ -663,25 +676,34 @@ const L4_COARSENING: [f64; 3] = [f64::INFINITY, 1e6, 1e3];
 /// has a non-zero winding number about `outer`. Two rings that cross are
 /// L5's, not this test's.
 fn inside(inner: &Polygon2, outer: &Polygon2) -> bool {
-    inner
-        .points()
-        .first()
-        .is_some_and(|&p| outer.winding_number(p) != 0)
+    clear_point(inner, outer)
+        .or_else(|| inner.points().first().copied())
+        .is_some_and(|p| outer.winding_number(p) != 0)
 }
 
-/// `true` when `inner`'s first vertex, a point of its loop, is farther
-/// than twice `outer`'s deviation from every segment of `outer`: then
+/// `true` when a vertex of `inner`, a point of its loop, is farther than
+/// twice `outer`'s deviation from every segment of `outer`: then
 /// `outer`'s loop and every polygon of it at least as fine wind about it
 /// as `outer` does.
 fn clear_of(inner: &Polygon2, outer: &Polygon2) -> bool {
-    let Some(&p) = inner.points().first() else {
-        return false;
-    };
+    clear_point(inner, outer).is_some()
+}
+
+/// The first vertex of `inner` farther than twice `outer`'s deviation
+/// from every segment of `outer`, the point a hole is asked to be inside
+/// at. Not always the first: a hole may meet its outer loop at a vertex
+/// of both — Open CASCADE's crescent, an outer bound and a hole through
+/// the point where its arcs touch — and starts there.
+fn clear_point(inner: &Polygon2, outer: &Polygon2) -> Option<Point2> {
     let reach = 2.0 * outer.chord_deviation();
-    reach.is_finite()
-        && outer.segments().all(|(a, b)| {
+    if !reach.is_finite() {
+        return None;
+    }
+    inner.points().iter().copied().find(|&p| {
+        outer.segments().all(|(a, b)| {
             let ab = b - a;
             let t = ((p - a).dot(&ab) / ab.norm_squared()).clamp(0.0, 1.0);
             (p - (a + ab * t)).norm() > reach
         })
+    })
 }

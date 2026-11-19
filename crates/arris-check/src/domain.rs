@@ -158,7 +158,7 @@ impl<'m> FaceDomain<'m> {
     /// has no polygon (L1's and E1's to report). The (u, v) box holds the
     /// true boundary: it is the polygons' box grown by their chord
     /// deviation. The 3D box holds the face: its edges' curve boxes, each
-    /// grown by the edge's tolerance, and the surface over the (u, v)
+    /// grown by the edge's tolerance, its vertices' points grown by theirs, and the surface over the (u, v)
     /// box, all grown by the face's own tolerance.
     ///
     /// Errors: the face, its surface, or a pcurve, edge or curve it uses
@@ -214,6 +214,14 @@ impl<'m> FaceDomain<'m> {
                 edges.push(c.edge());
             }
             let edge = model.edge(c.edge())?;
+            // A vertex's tolerance may exceed its edges' and the face's:
+            // the point a vertex holds is boxed by that tolerance, so a
+            // point on the vertex is in the face's box.
+            for v in [edge.start(), edge.end()] {
+                let vertex = model.vertex(v)?;
+                let b = Aabb::of_point(vertex.point()).inflated(vertex.tolerance());
+                curves = Some(curves.map_or(b, |acc| acc.union(b)));
+            }
             let Some((curve, range)) = edge.curve() else {
                 continue;
             };
@@ -358,5 +366,25 @@ impl<'m> FaceDomain<'m> {
     /// Errors: an edge, vertex or curve that does not resolve.
     pub fn boundary_entity(&self, model: &Model, point: Point3) -> Result<Option<Shape>, NotFound> {
         boundary_entity(model, self.edges.iter().copied(), point)
+    }
+
+    /// The vertex, edge or face that contains a contact point. Read the
+    /// boundary first so chart seams and poles need no surface projection.
+    ///
+    /// Errors: a face or boundary reference that does not resolve.
+    #[doc(hidden)]
+    pub fn entity_at_contact(
+        &self,
+        model: &Model,
+        point: Point3,
+    ) -> Result<Option<Shape>, NotFound> {
+        if let Some(boundary) = self.boundary_entity(model, point)? {
+            return Ok(Some(boundary));
+        }
+        let tolerance = model.face(self.face)?.tolerance();
+        Ok(self.surface.project(point).ok().and_then(|p| {
+            (p.distance <= tolerance && self.side(p.uv).0 != Side::Outside)
+                .then(|| Shape::new(self.face, Orientation::Forward))
+        }))
     }
 }

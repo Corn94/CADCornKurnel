@@ -908,17 +908,19 @@ fn one() -> usize {
     1
 }
 
-/// A result the oracle builds and Arris refuses by design: the typed
+/// A result Arris refuses by design: the typed
 /// error the corpus runner asserts instead of comparing the result
 /// (ADR-0004). The oracle's numbers are recorded in `expected.json` as the
 /// record of what Open CASCADE makes, and not compared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExpectError {
+    /// `OpError::Degenerate` with `BooleanReason::Empty`: neither operand
+    /// contributes material to the common, and the oracle records no solid.
+    Empty,
     /// `OpError::Degenerate` with `BooleanReason::TangentContact`: two faces
-    /// touch along a curve interior to both. The oracle's result carries
-    /// the contact as an edge of four faces; where that makes its Euler
-    /// characteristic odd it records no genus, and the recipe states none.
+    /// of one lump touch along a curve or at a point. Where the oracle's
+    /// contact makes its Euler characteristic odd it records no genus.
     TangentContact,
     /// `OpError::Degenerate` with `InputReason::NonManifold`: two shells of the
     /// result would share an edge or a vertex (ADR-0006). The oracle's
@@ -1028,6 +1030,13 @@ pub struct Analytic {
     /// Arris refuses the result the oracle builds, with this error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expect_error: Option<ExpectError>,
+    /// The step whose refusal `degenerate` or `expect_error` is, where it is
+    /// not the result step: a program a consumer runs stops at the first
+    /// step that fails, so a recipe whose earlier step is the one refused
+    /// names it. Unset, the result step is the one, and a refusal at any
+    /// other step fails the fixture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refuses_at: Option<String>,
     /// Volume.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume: Option<Num>,
@@ -1050,6 +1059,13 @@ pub struct Analytic {
     /// Euler line with `genus`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub counts_differ: Option<String>,
+    /// Why Open CASCADE's shape of a result Arris builds has an odd Euler
+    /// characteristic (a touching ruling carried as an edge of four faces,
+    /// as for a tangent contact, where Arris keeps a manifold body): the
+    /// oracle then records no genus for it, and the lint asks none.
+    /// `analytic.genus` is Arris's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occt_odd_euler: Option<String>,
     /// The inertia tensor about the centroid at unit density, as rows, in
     /// `expected.json`'s convention (the products of inertia negated).
     /// Cross-checked against the oracle's like the other closed forms;
@@ -1122,6 +1138,16 @@ pub struct Analytic {
     /// read back by Open CASCADE and compared.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occt_step_unread: Option<String>,
+    /// Why Arris's reading of Open CASCADE's own STEP of this result has
+    /// other counts than the oracle's shape, where the reading is valid
+    /// and measures as the shape does: the file carries topology its
+    /// shape does not (`boolean/fuse-cylinder-tangent-inside`: two
+    /// `VERTEX_POINT`s at each point where a crescent's bounds touch,
+    /// one in its shape, which Open CASCADE's own reader heals into one).
+    /// Both read-back stages then hold the reading to the checker and
+    /// the measures, not to the oracle's counts and genus.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occt_step_counts_differ: Option<String>,
     /// Why Open CASCADE's own STEP of this result carries a B-spline face
     /// where Arris's result has an exact one: its blend there is a walked
     /// surface (`blend/turned-shoulder-fillet`). The runner's plain
@@ -1916,6 +1942,16 @@ fn lint_recipe_names(r: &Recipe) -> Vec<String> {
     if !names.contains(r.result.as_str()) {
         problems.push(format!("result {:?} is not a step", r.result));
     }
+    if let Some(at) = &r.analytic.refuses_at {
+        if !names.contains(at.as_str()) {
+            problems.push(format!("analytic.refuses_at {at:?} is not a step"));
+        }
+        if !r.analytic.degenerate && r.analytic.expect_error.is_none() {
+            problems.push(
+                "analytic.refuses_at needs analytic.degenerate or analytic.expect_error".into(),
+            );
+        }
+    }
 
     problems
 }
@@ -2006,6 +2042,10 @@ fn lint_flags(fixture: &Fixture, variant: &str, m: &Measured) -> Vec<String> {
         ("occt_step_refused", a.occt_step_refused.is_some()),
         ("occt_nurbs_refused", a.occt_nurbs_refused.is_some()),
         ("occt_step_unread", a.occt_step_unread.is_some()),
+        (
+            "occt_step_counts_differ",
+            a.occt_step_counts_differ.is_some(),
+        ),
     ] {
         if refused && (a.degenerate || a.expect_error.is_some() || a.step_differs.is_some()) {
             problems.push(format!(
@@ -2074,10 +2114,12 @@ fn lint_euler(a: &Analytic, variant: &str, m: &Measured, complete: &mut bool) ->
                     | ExpectError::FrameDoesNotClose
             )
         );
+        let odd_euler = a.occt_odd_euler.is_some();
         let genus = match (m.genus, non_manifold) {
             (Some(genus), _) => Some(genus),
             // Solids sharing an edge or a vertex, or faces sharing a
             // tangent contact as an edge of four, close no Euler line.
+            (None, _) if odd_euler => None,
             (None, true) => {
                 if a.genus.is_some() {
                     problems.push(format!(

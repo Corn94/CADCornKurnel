@@ -6,15 +6,42 @@ tessellation, STEP. A library: any CAD, CAM or simulation tool can build on it; 
 consumer swaps it in behind a kernel facade once it passes that
 application's probe corpus.
 
-Read in this order: `SEED.md` (charter, competition, stack, the decisions
+## Contributing from a fork
+
+If you cloned a fork to submit a pull request, use this workflow.
+
+1. Follow [Setup](#setup-once-per-clone), read the project and kernel rules
+   below, and start a topic branch from the canonical repository's current
+   `main`. Keep that branch rebased on upstream `main`. The plan and
+   release pipeline below is for maintainer work.
+2. Use an author email with a dotted domain. Write commit subjects in the
+   form `type(scope): lower-case summary` without a trailing period. Keep
+   merge commits and `Co-Authored-By`, `Claude-Session`, and
+   `Generated with` trailers out of the branch.
+3. Include a regression fixture and its oracle value for a geometry fix.
+   Put new STEP data under `tests/fixtures/`. Propose changelog wording
+   and describe any decision that needs an ADR in the pull request.
+   The maintainer edits `CHANGELOG.md` and `docs/adr/` at landing.
+4. Run [`tools/pr-check.sh`](tools/pr-check.sh) from the committed branch
+   tip and fix any findings. It fetches canonical `main` and checks your
+   commits, file placement, formatting, clippy, and the tests the change
+   reaches. A passing check verifies the tip for the push hook. Push the
+   branch to your fork and open a pull request against upstream `main`
+   using the [template](.github/pull_request_template.md).
+
+At startup, a top-level agent (including a plan conductor) reads in this
+order: `SEED.md` (charter, competition, stack, the decisions
 taken at kickoff), `docs/ARCHITECTURE.md`, `docs/DATA-MODEL.md`,
 `docs/ROADMAP.md`, `docs/adr/`, then the rules in `.agents/rules/*.md`
 (git, docs lifecycle, kernel) — Claude Code loads them automatically via
 `.claude/rules`; any other agent reads them here. `GLOSSARY.md` holds the
-project's words, one meaning each: use them as written. Skills live in
+project's words, one meaning each: use them as written. Delegated plan
+steps use the conductor's reading list and follow references as needed.
+Skills live in
 `.agents/skills/` (same symlink arrangement): the idea → plan → work →
-retire → close-cycle → release pipeline, `refactor-review` (structural
-debt, measured and read, as one idea), `inspect` for seeing geometry,
+retire → close-cycle → release pipeline, `contribute` for preparing a fork
+PR, `review-pr` for maintainer review and landing, `refactor-review`
+(structural debt, measured and read, as one idea), `inspect` for seeing geometry,
 `map` for seeing the architecture (charts and checks derived from the code),
 and for the human `/next`, `/handoff`, `/retro` and `/wait-what`.
 
@@ -31,23 +58,19 @@ cargo install cargo-fuzz --locked
 
 ## Current state
 
-**C1–C10 done and released (2026-09-12 to 10-22)**, each compressed to its status line
-in `docs/ROADMAP.md`: the vertical slice, the application gate, every
-quadric pair, the STEP reader and real-part corpus, the consumer's API, the
-blend network, prismatic features, the query cycle, the healing cycle, and
-the NURBS cycle (NURBS blocks 0 of 38 parts). ADR-0001 to ADR-0068; PyPI
-`arris` beside them (ADR-0034); audience developers first (ADR-0067).
-**C11, the blend residue, done 2026-11-04** (ADR-0070 to ADR-0084, released
-as 0.10.0, 2026-11-04): the real parts' blend row **0 of 38** and the script corpus's
-`fillet` refusals 0, a second oracle's records (ADR-0073) holding what Open
-CASCADE cannot; closed with five nightly findings open, two of them panics
-(`docs/BACKLOG.md` §Findings). **C12, the plugin CAD's remaining asks**
-(opened 2026-11-04): draft and thicken, then `region2`; every kernel row of
-the histogram is 0, so ADR-0020's consumer amendment picked it.
-The nightly's two panics (the posed slot chain and elbow, a NURBS curve
-called `Coincident`) are fixed. The refactor review's remaining census and
-test work is done. Per-face surface properties landed beside C12 and shipped as
-0.11.0 (2026-11-14), then 0.11.1 (2026-11-16), the first release on PyPI. **Next:** C12's first `/idea` or `/plan`.
+**C1–C10 done and released (2026-09-12 to 10-22)**, with their status
+lines in `docs/ROADMAP.md`. **C11, the blend residue, done and released
+as 0.10.0 (2026-11-04)**. The blend row blocked 0 of 38 real parts,
+the scripts had 0 fillet refusals, and five nightly findings stayed open.
+**C12, the training harness's refusals**, opened 2026-11-04 and re-scoped
+2026-11-16 (ADR-0020). The cycle's exact batched classification, flat-edge
+classification and tangency fixes are done. Per-face surface properties
+shipped beside it in 0.11.0, followed by 0.11.1, the first release on PyPI.
+Solids that touch along a curve, at a point or through shared topology
+build as touching lumps. Each lump keeps its own contact edges and
+vertices (ADR-0088 to ADR-0090). Draft, thicken and `region2` wait for the
+next named cycle.
+**Next:** `/plan revolve-circle-meets-the-axis` (`docs/ROADMAP.md` §C12 **In**).
 
 ## Rules that are not derivable from the code
 
@@ -75,9 +98,9 @@ test work is done. Per-face surface properties landed beside C12 and shipped as
   `/close-cycle` at a roadmap boundary, then `/release`. Not every idea becomes a plan. Details:
   `.agents/rules/docs-lifecycle.md`.
 - `/work <slug>` with no step **conducts** the plan: each step a fresh
-  subagent on its tier (`.agents/tiers.md` maps tiers to models), then the
-  conducting session follows `retire-plan`'s SKILL.md (the Skill tool refuses it). Waits (gate, CI) run in the
-  background, never in a foreground loop.
+  subagent on its tier (`.agents/tiers.md` maps tiers to models), then a
+  fresh coordinator follows `retire-plan`'s SKILL.md. Use the harness
+  completion waits in `.agents/rules/git.md`.
 - Trunk-based git, `main` always green (a pushed tip is a verified commit,
   ADR-0078), commit per plan step, never push or publish unasked: `.agents/rules/git.md`. `main` carries the next
   version with `-dev`; a `v*` tag the human pushes is what publishes the

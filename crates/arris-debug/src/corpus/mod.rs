@@ -597,7 +597,17 @@ fn build_all(
         }
         let built = build_step(m, fixture, step, params, made, profiles, &Control::NONE);
         if let Some(refusal) = refusal {
-            if step.name() == fixture.recipe.result {
+            // The refusal is the result step's, or the earlier step the
+            // fixture names (`analytic.refuses_at`), whose failure ends the
+            // program there: a later step never runs. A failure at any
+            // other step is not the refusal and falls through to `?`.
+            let at = fixture
+                .recipe
+                .analytic
+                .refuses_at
+                .as_deref()
+                .unwrap_or(&fixture.recipe.result);
+            if step.name() == at {
                 refusal.assert(&fixture.name, step.name(), built.map(|_| ()))?;
                 return Ok(false);
             }
@@ -747,7 +757,7 @@ pub fn run(dir: &Path, variant: &str) -> Result<(), CorpusError> {
     };
     // A result the recipe says Arris refuses by design, or one the oracle
     // records no solid for, must fail with its typed error at the result
-    // step; nothing after it is compared. The recipe's named error comes
+    // step, or at an earlier step the program stops at; nothing after it is compared. The recipe's named error comes
     // first: an oracle that makes nothing does not loosen it to any
     // `Degenerate`.
     let refusal = match fixture.recipe.analytic.expect_error {

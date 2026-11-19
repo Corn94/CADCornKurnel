@@ -1,0 +1,22 @@
+{
+  "description": "a cone frustum (radius 3 at z = 0, 2 at z = 4, seam at +x) and a 2 x 2 x 2 box standing on its top plane, z in 4..6, x in 2..4. The box's bottom edge touches the top rim at (2, 0, 4), the rim's seam vertex. Each of the two lumps has its own contact vertex (ADR-0090)",
+  "steps": [
+    {"name": "section", "op": "profile",
+     "plane": {"origin": [0, 0, 0], "x": [1, 0, 0], "y": [0, 0, 1]},
+     "outer": {"start": [0, 0], "segments": [{"line_to": [3, 0]}, {"line_to": [2, 4]}, {"line_to": [0, 4]}, {"line_to": [0, 0]}]}},
+    {"name": "frustum", "op": "revolve", "profile": "section", "axis": {"origin": [0, 0, 0], "direction": [0, 0, 1]}, "angle_deg": 360},
+    {"name": "lug", "op": "box", "min": [2, -1, 4], "max": [4, 1, 6]},
+    {"name": "result", "op": "fuse", "a": "frustum", "b": "lug"}
+  ],
+  "result": "result",
+  "probes": [],
+  "analytic": {
+    "counts_differ": "Open CASCADE's two solids share the rim contact vertex. Arris copies it per lump.",
+    "occt_odd_euler": "The two Open CASCADE solids share the contact vertex.",
+    "occt_step_counts_differ": "Open CASCADE writes 11 distinct vertices instead of its 10 in memory, giving each solid its own contact vertex.",
+    "genus": 0,
+    "counts": {"vertices": 11, "edges": 16, "faces": 9, "loops": 9, "shells": 2, "solids": 2},
+    "volume": "76 * pi / 3 + 8",
+    "area": "pi * (5 * sqrt(17) + 13) + 24"
+  }
+}

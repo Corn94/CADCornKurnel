@@ -16,6 +16,7 @@ mod pave;
 pub(crate) mod pieces;
 mod result;
 mod section;
+mod shared;
 mod split;
 
 use core::fmt;
@@ -66,9 +67,9 @@ pub struct FacePair {
     /// curve interior to both faces — and the curvature rule at each;
     /// neither contributes a section edge. A `Meets` holding both kinds
     /// is read as both, its crossing curves sections and its touching
-    /// curves contacts. Its points are read only as a traced section's
-    /// singular points, where its branches end (ADR-0018), each a section
-    /// crossing.
+    /// curves contacts. Crossing points mark the ends of traced section
+    /// branches (ADR-0018). Isolated touches guide piece classification
+    /// and are checked against the surviving trims (ADR-0089).
     pub intersection: SurfaceIntersection,
 }
 
@@ -343,11 +344,14 @@ pub struct SharedSection {
 /// block between consecutive paves whose midpoint is inside both faces
 /// is a contact; on a closed curve the last block wraps round to the
 /// first pave, and a closed curve with none is one block of a whole
-/// period. A contact contributes no section edge and splits
-/// nothing; the boolean decides at its midpoint, by the curvature rule,
-/// whether the piece of each face through it would survive, and refuses
-/// with [`crate::BooleanReason::TangentContact`] when both would — the slit no
-/// manifold `Solid` can carry (ADR-0004).
+/// period. A third operand's boundary can add paves for selection.
+/// A contact contributes no section edge. The boolean applies the
+/// curvature rule at the midpoint to decide whether each face piece
+/// there would survive. When both
+/// would, the two result faces touch along the curve: touching lumps
+/// where they lie in different lumps (ADR-0088), and where they lie in
+/// one it refuses with [`crate::BooleanReason::TangentContact`] — the slit
+/// no manifold lump can carry (ADR-0004).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Contact {
     /// The pair, an index into [`Interferences::pairs`].
@@ -384,8 +388,12 @@ pub struct EdgeEdgeHit {
     pub tb: f64,
     /// The point, on `a`'s edge.
     pub point: Point3,
-    /// `true` when the curves touch here without crossing. A touch makes
-    /// no vertex and no pave.
+    /// `true` when the curves touch here without crossing and neither
+    /// runs inside the other's face beside the touch. Such a touch makes
+    /// no vertex and no pave; one where an edge runs inside the other
+    /// face — a rim tangent inside a bar's end edge — is a vertex of
+    /// both, recorded as a crossing, and so is a touch of two faces on
+    /// opposite sides of one plane, the solids touching at that point.
     pub tangent: bool,
     /// The section vertex it was merged into; `None` for a touch.
     pub vertex: Option<usize>,
@@ -655,6 +663,15 @@ pub fn interferences_many(
 /// parent's. The result is deterministic: the same ids on every run and
 /// every platform.
 ///
+/// The operands may share entities by id, as a body and one split from it
+/// and fused back do: the tool is then decomposed as its copy, so an
+/// entity of it the result keeps is `Modified` from the tool's own, and a
+/// shared entity the result keeps by id is the target's, untouched
+/// (`docs/DATA-MODEL.md` §Provenance). [`fuse`], [`common`], their n-ary
+/// forms and the `interference` query read shared operands so;
+/// [`interferences`] and [`interferences_many`] decompose the operands as
+/// given, and two that share a face fault there (`docs/BACKLOG.md`).
+///
 /// A face of the target coincident with a face of the tool is the
 /// flush case, a named one: the two faces' edges split each other on
 /// their shared surface, and a piece of the target's face lying on the
@@ -670,25 +687,30 @@ pub fn interferences_many(
 /// point lies on it is classified by the curvature rule (it lies inside
 /// the other operand exactly when its surface's normal curvature across
 /// the curve, signed against the other face's outward
-/// normal, is below the other surface's), and a tool touching from
-/// outside leaves the target as it was, every id kept.
+/// normal, is below the other surface's). A tool touching from outside
+/// along such a curve or at an isolated point, such as a ball at an
+/// end disc, leaves the target whole.
+/// When separate result lumps meet at a shared edge or vertex, each
+/// shell gets its own copy of that topology (ADR-0090).
 ///
 /// Errors, the model untouched on each: [`OpError::InvalidInput`] and
 /// [`OpError::NotFound`] as every operation; [`OpError::Unsupported`]
 /// naming the pair for a surface pair or an edge–face pair with no
 /// closed form, and for a piece lying on an edge or a vertex of the
 /// other operand, or on a face of it that its own face is neither
-/// coincident nor tangent with; [`OpError::Degenerate`] with
+/// coincident nor tangent with, when no side is established;
+/// [`OpError::Degenerate`] with
 /// [`crate::BooleanReason::Empty`] when nothing survives (the target inside the
 /// tool), [`crate::InputReason::ZeroThickness`] when nothing survives and
 /// what was dropped lay on the other operand (two solids touching along
-/// a face), [`crate::InputReason::NonManifold`] naming the shared edges or
-/// vertices when two shells of the result would touch along an edge or at
-/// a vertex, [`crate::BooleanReason::TangentContact`] when two faces touch along a
-/// curve interior to both and both pieces through it would survive —
-/// a hole wall tangent to a side face, a ball in a bore of its radius —
-/// or a section edge is tangent to
-/// a loop edge at a vertex;
+/// a face), [`crate::InputReason::NonManifold`] naming the source entities
+/// when a shared edge or vertex, including copies inherited from an
+/// operand, would leave one lump touching itself, or a shell would gain
+/// coincident vertices, [`crate::BooleanReason::TangentContact`] when two faces of
+/// one lump retain a curve contact interior to both or an isolated
+/// contact away from shared topology (a cavity tangent to a wall), or
+/// a section edge is tangent to a loop edge at a vertex (ADR-0088,
+/// ADR-0089);
 /// [`OpError::Tolerance`] when a section vertex or edge would exceed the
 /// model's maximum; [`OpError::Internal`] for a kernel bug the operation
 /// caught — an arrangement that is not a subdivision, a point that
@@ -878,9 +900,16 @@ fn many(
     for &body in operands {
         crate::verify_solid(m, body)?;
     }
-    let mut meter = Meter::new(control);
-    let i = pave::build(m, operands, &mut meter)?;
-    result::boolean(m, &i, op, &mut meter)
+    m.transaction(|m| {
+        let apart = shared::apart(m, operands, control)?;
+        let mut meter = Meter::new(control);
+        let made = pave::build(m, &apart.operands, &mut meter)
+            .and_then(|i| result::boolean(m, &i, op, &mut meter))
+            .and_then(|(body, made)| Ok((body, apart.restore(m, body, made)?)));
+        let (body, made) = made.map_err(|e| apart.error(e))?;
+        apart.discard(m, body, operands)?;
+        Ok((body, made))
+    })
 }
 
 /// `body` named by a boolean's refusal.
@@ -909,8 +938,16 @@ fn refusal(body: Body, reason: BooleanReason) -> OpError {
 /// the face of every hit it merges, a section edge from both faces of
 /// its pair; the result's body is `Modified` from both operands', and
 /// each result shell from the operand shells its pieces came from — two
-/// operands that do not meet are two lumps of one solid (ADR-0006,
-/// `docs/DATA-MODEL.md` §Provenance). Tolerances follow
+/// disjoint operands are two lumps of one solid (ADR-0006,
+/// `docs/DATA-MODEL.md` §Provenance). A supported tangent contact along a
+/// curve or at an isolated point between separate lumps preserves both.
+/// Each shell gets its own copy of any shared edge or vertex at the
+/// contact (ADR-0088, ADR-0089, ADR-0090). Such a contact within one lump,
+/// including contact through copies inherited from an operand, gives
+/// [`crate::InputReason::NonManifold`]. A curve contact interior to both
+/// faces, or an isolated touch away from shared topology in one lump,
+/// gives [`crate::BooleanReason::TangentContact`].
+/// A join that covers the contact can build. Tolerances follow
 /// the growth rule, as [`cut`]. Two faces on one surface are the flush
 /// case: a piece of `a`'s face lying on `b`'s is kept, once and in `a`'s
 /// orientation, exactly when the two effective normals agree, and
@@ -965,8 +1002,9 @@ pub fn fuse(
 /// result shell from the operand shells its pieces came from.
 ///
 /// Errors, the model untouched on each: as [`cut`]'s, with
-/// [`crate::BooleanReason::Empty`] where two operands share no material — the
-/// common of disjoint solids — and [`crate::InputReason::ZeroThickness`]
+/// [`crate::BooleanReason::Empty`] where two operands share no material,
+/// including solids that meet only at an isolated touch, and
+/// [`crate::InputReason::ZeroThickness`]
 /// where they share only a face.
 ///
 /// ```
@@ -991,9 +1029,16 @@ pub fn common(
 ) -> Result<(Body, Provenance), OpError> {
     crate::verify_solid(m, a)?;
     crate::verify_solid(m, b)?;
-    let mut meter = Meter::new(control);
-    let i = pave::build(m, &[a, b], &mut meter)?;
-    result::boolean(m, &i, result::Op::Common, &mut meter)
+    m.transaction(|m| {
+        let apart = shared::apart(m, &[a, b], control)?;
+        let mut meter = Meter::new(control);
+        let made = pave::build(m, &apart.operands, &mut meter)
+            .and_then(|i| result::boolean(m, &i, result::Op::Common, &mut meter))
+            .and_then(|(body, made)| Ok((body, apart.restore(m, body, made)?)));
+        let (body, made) = made.map_err(|e| apart.error(e))?;
+        apart.discard(m, body, &[a, b])?;
+        Ok((body, made))
+    })
 }
 
 /// What [`common_probe`] found: the pave model, and the common built from
@@ -1021,9 +1066,16 @@ pub(crate) fn common_probe(
 ) -> Result<Probe, OpError> {
     crate::verify_solid(m, a)?;
     crate::verify_solid(m, b)?;
+    // The caller's model is a scratch copy and the record is not kept, so
+    // the copy `apart` appends needs no transaction, no restore and no
+    // discard (the probe's pave model names it, and the scratch model is
+    // dropped with it); an error still names the caller's entities.
+    let apart = shared::apart(m, &[a, b], control)?;
     let mut meter = Meter::new(control);
-    let i = pave::build(m, &[a, b], &mut meter)?;
-    let common = match result::boolean_each_witnessed(m, &i, &[result::Op::Common], &mut meter) {
+    let i = pave::build(m, &apart.operands, &mut meter).map_err(|e| apart.error(e))?;
+    let common = match result::boolean_each_witnessed(m, &i, &[result::Op::Common], &mut meter)
+        .map_err(|e| apart.error(e))
+    {
         Ok(mut made) => {
             let (body, _, outside) =
                 made.pop()

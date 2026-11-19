@@ -115,6 +115,12 @@ corpus_tests! {
     /// crossing and inside, both orders, and two cylinders along a ruling
     /// (ADR-0055).
     query_interference_primitives => query "query/interference-primitives";
+    /// Both operand orders for the hinge, the ball knob, a ball on a plate
+    /// and two balls meeting at their seams.
+    query_interference_analytic_touches => query "query/interference-analytic-touches";
+    /// The torus link and box touch at a point in either order, at or away
+    /// from the torus's seams.
+    query_interference_torus_box_point => query "query/interference-torus-box-point";
     /// A drilled plate against a pin with clearance, line to line and pressed
     /// in; an L bracket against its bolt, the head resting on the foot
     /// (ADR-0055).
@@ -123,6 +129,14 @@ corpus_tests! {
     /// (ADR-0061), a box far from it is apart in Open CASCADE's answer and
     /// refused here (ADR-0055).
     query_interference_nurbs_cylinder => query "query/interference-nurbs-cylinder";
+    /// A box against the same box split another way, its halves and its
+    /// thirds fused from pieces: overlap 4, each inside the other. A seam
+    /// of one body crossing a seam of the other is not one curve.
+    query_interference_box_against_its_halves => query "query/interference-box-against-its-halves";
+    /// A box against itself split by a plane and fused back, a body that
+    /// shares the box's untouched faces by id: overlap 4, each inside the
+    /// other.
+    query_interference_box_against_its_split_and_fused_sides => query "query/interference-box-against-its-split-and-fused-sides";
     /// A block, cylinder, tube, ball, cone, torus and U-bracket cut by planes
     /// across, along and through their seams and apex (ADR-0056).
     query_section_primitives => query "query/section-primitives";
@@ -238,16 +252,87 @@ corpus_tests! {
     boolean_enclosed_cavity => run "boolean/enclosed-cavity";
     /// Operands apart: two lumps, every face of both kept by id.
     boolean_disjoint_fuse => run "boolean/disjoint-fuse";
+    /// A ball and a cylinder end disc touch at the ball's pole, with the
+    /// disc centred or offset. The fuse has two lumps.
+    boolean_ball_on_disc_fuse => run "boolean/ball-on-disc-fuse";
+    /// A bridge joins the ball and stem away from the pole, leaving a pinch.
+    boolean_ball_on_disc_exposed_join => run "boolean/ball-on-disc-exposed-join";
+    /// A bridge covering the contact puts the pole inside the joined lump.
+    boolean_ball_on_disc_covered_join => run "boolean/ball-on-disc-covered-join";
+    /// Cutting the disc's stem with the ball leaves the stem whole.
+    boolean_ball_on_disc_cut_stem => run "boolean/ball-on-disc-cut-stem";
+    /// Cutting the ball with the disc's stem leaves the ball whole.
+    boolean_ball_on_disc_cut_ball => run "boolean/ball-on-disc-cut-ball";
+    /// A point of contact encloses no material. The common is Empty.
+    boolean_ball_on_disc_common => run "boolean/ball-on-disc-common";
+    /// A small gap leaves two disjoint lumps.
+    boolean_ball_on_disc_gap => run "boolean/ball-on-disc-gap";
+    /// A shallow overlap gives one spherical cap in common.
+    boolean_ball_on_disc_overlap => run "boolean/ball-on-disc-overlap";
+    /// Cutting a spherical cavity that touches its own outer wall is refused.
+    boolean_ball_on_disc_cavity => run "boolean/ball-on-disc-cavity";
+    /// A torus and a box fuse at one point, at the torus's seam vertex
+    /// or off both seams.
+    boolean_torus_box_point_fuse => run "boolean/torus-box-point-fuse";
+    /// The fuse keeps the torus whole when the touch is on its equator seam.
+    boolean_torus_box_point_fuse_equator_seam => run "boolean/torus-box-point-fuse-equator-seam";
+    /// The tangent box leaves the torus whole with the touch at the torus's
+    /// seam vertex or off both seams.
+    boolean_torus_box_point_cut_torus => run "boolean/torus-box-point-cut-torus";
+    /// Cutting at the equator seam keeps the torus's seam whole.
+    boolean_torus_box_point_cut_torus_equator_seam => run "boolean/torus-box-point-cut-torus-equator-seam";
+    /// The tangent torus leaves the box whole in all three poses.
+    boolean_torus_box_point_cut_box => run "boolean/torus-box-point-cut-box";
+    /// A point of contact yields Empty with or without a seam there.
+    boolean_torus_box_point_common => run "boolean/torus-box-point-common";
     /// A cylinder wholly inside a box: a void of three faces, the seam
     /// carried with them.
     boolean_cavity_cylinder => run "boolean/cavity-cylinder";
     /// A box inside the cavity of a hollow box: three shells, two lumps, one
     /// of them in the other's void.
     boolean_lump_in_cavity => run "boolean/lump-in-cavity";
-    /// Two boxes touching along an edge: Open CASCADE builds two solids that
-    /// share it, Arris refuses with `InputReason::NonManifold` — the runner's
-    /// expected-error path.
+    /// Two boxes touching along an edge, copied once per result shell.
     boolean_edge_touching_fuse => run "boolean/edge-touching-fuse";
+    /// Drilling one lump leaves two lumps with separate contact edges.
+    boolean_edge_touching_drill => run "boolean/edge-touching-drill";
+    /// A bridge that covers the whole edge joins the touching lumps.
+    boolean_edge_touching_covered_join => run "boolean/edge-touching-covered-join";
+    /// A bridge leaving part of the edge exposed would make one lump touch itself.
+    boolean_edge_touching_exposed_join => run "boolean/edge-touching-exposed-join";
+    /// Three alternating 60-degree wedges, with six face uses around one edge.
+    boolean_three_wedges_one_edge_fuse_many => run "boolean/three-wedges-one-edge-fuse-many";
+    /// Two lumps with separate vertices where the box touches the frustum's top rim at its seam.
+    boolean_fuse_frustum_box_rim_point => run "boolean/fuse-frustum-box-rim-point";
+    /// The same opposite the seam. The contact splits the rim edge as well as the box edge.
+    boolean_fuse_frustum_box_rim_point_far_side => run "boolean/fuse-frustum-box-rim-point-far-side";
+    /// A unit cylinder fused with a radius-2 slab cylinder it is tangent
+    /// inside along x = 0, y = 1: V = 5 pi, A = 14 pi. Each outer cap is a
+    /// crescent, one loop through the vertex where its rim touches the
+    /// section circle, twice.
+    boolean_fuse_cylinder_tangent_inside => run "boolean/fuse-cylinder-tangent-inside";
+    /// A radius-1.5 cylinder fused with a radius-0.3 one tangent inside it
+    /// along a ruling 1e-4 rad off both seams: V = 2.43 pi, A = 8.7 pi. The
+    /// inner seam's crossing of each cap lies on the rim within its
+    /// tolerance, beside the touch, and is a vertex of the rim too.
+    boolean_fuse_cylinder_tangent_inside_near_seam => run "boolean/fuse-cylinder-tangent-inside-near-seam";
+    /// A 30 x 5 x 1 bar with a radius-3 boss tangent to each end face,
+    /// fused one boss then the other: V = 154.50155561268. Each rim
+    /// touches the end edges from inside the bar's top and bottom, a
+    /// vertex of both, at the boss's seam at x = 15 and inside both edges
+    /// at x = -15.
+    boolean_fuse_bar_end_bosses_tangent => run "boolean/fuse-bar-end-bosses-tangent";
+    /// A plate whose arc is tangent inside a unit cylinder's wall, fused
+    /// with the cylinder: V = 2 pi + (1/2 + pi/8)/4. The touching ruling
+    /// has the cylinder's material on both its sides on the arc and the
+    /// plate's on both on the wall, so it is no section on either face.
+    boolean_fuse_arc_plate_tangent_inside_cylinder => run "boolean/fuse-arc-plate-tangent-inside-cylinder";
+    /// A bored box with a 1 x 1 column cut through the bore it is tangent
+    /// to along four lines: V = 184, genus 1, each column wall whole.
+    boolean_cut_bore_tangent_column => run "boolean/cut-bore-tangent-column";
+    /// A horizontal cylinder whose end disc is tangent to a vertical
+    /// cylinder's wall along a line: V = 15 pi - 8/3, the horizontal wall
+    /// a crescent through the touch on its end rim, the end disc whole.
+    boolean_fuse_end_disc_tangent_to_wall => run "boolean/fuse-end-disc-tangent-to-wall";
     boolean_boss => run "boolean/boss";
     /// A plate cut by a 2×2 grid of four disjoint holes in one call.
     boolean_plate_2x2_holes_cut_many => run "boolean/plate-2x2-holes-cut-many";
@@ -283,7 +368,7 @@ corpus_tests! {
     boolean_overlapping_pockets_cut_many => run "boolean/overlapping-pockets-cut-many";
     /// Two bosses overlapping on a plate's top fused in one call: the top flush with both bosses' bottoms at once.
     boolean_overlapping_bosses_fuse_many => run "boolean/overlapping-bosses-fuse-many";
-    /// Two pockets touching along an edge: Arris refuses with `InputReason::NonManifold`.
+    /// Both material sectors at the pockets’ shared edge remain in one lump: `NonManifold`.
     boolean_pockets_touching_edge_cut_many => run "boolean/pockets-touching-edge-cut-many";
     /// Two holes whose walls touch along a ruling inside the plate: Arris refuses with `BooleanReason::TangentContact`.
     boolean_tangent_holes_cut_many => run "boolean/tangent-holes-cut-many";
@@ -338,8 +423,7 @@ corpus_tests! {
     /// other, meeting at the crossing vertices.
     boolean_cross_cylinders_fuse => run "boolean/cross-cylinders-fuse";
     /// The target minus the tool that is as wide as it: two lumps whose
-    /// closures touch at the crossing vertices, `InputReason::NonManifold`
-    /// through the runner's expected-error path (ADR-0006).
+    /// closures touch at the crossing vertices, copied per lump (ADR-0090).
     boolean_cross_cylinders_cut => run "boolean/cross-cylinders-cut";
     /// The common at ψ = 60°: ellipses of two different major radii still
     /// crossing at (0, ±R, 0), `16R³/(3 sin ψ)`.
@@ -450,6 +534,12 @@ corpus_tests! {
     /// top circle at one point.
     #[ignore = "kernel bug: Internal, the face arrangement is not a subdivision, a section edge ends at a node nothing else reaches where the plane touches the rim at a point; the planar section faults with it (docs/BACKLOG.md, a plane touching a body's rim at a point)"]
     regression_cylinder_rim_touching_split => run "regression/cylinder-rim-touching-split";
+    /// The script corpus's bottle-cap thread alone: a triangle 2.5 turns
+    /// along a helix of pitch 3. The sweep builds in a fraction of a
+    /// second; the checker at `Full` takes minutes on its NURBS faces
+    /// against each other. The desired run checks it green in seconds.
+    #[ignore = "slow: the checker's Full S5 marches the swept thread's NURBS x NURBS face pairs for minutes (spline_nurbs::isolate under Marcher::boundary_seeds), past the fast profile's 8 min on a shared machine (docs/BACKLOG.md, check-full-of-a-swept-thread-takes-minutes)"]
+    regression_swept_thread_full_check_slow => run "regression/swept-thread-full-check-slow";
     /// flush-union's second box a tolerance off the shared face: moved away, into the first, or turned about the face's middle line.
     #[ignore = "Fault::Split EmptySubEdge, Fault::CommonBlock, Fault::Split Turn, and plane against plane Unsupported a hair off parallel (docs/BACKLOG.md, ADR-0022)"]
     regression_flush_union_a_tolerance_off => run "regression/flush-union-a-tolerance-off";
@@ -685,9 +775,23 @@ corpus_tests! {
     /// each outside the other, and the cut is the target with every id kept.
     /// Open CASCADE imprints the ruling (`analytic.counts_differ`).
     boolean_tangent_cylinders_cut => run "boolean/tangent-cylinders-cut";
-    /// The same operands fused: both walls survive through the contact,
-    /// `BooleanReason::TangentContact` through the runner's expected-error path.
+    /// The same operands fused: both walls survive through the contact
+    /// in two lumps of one solid (ADR-0088).
     boolean_tangent_cylinders_fuse => run "boolean/tangent-cylinders-fuse";
+    /// A bridge between two touching lumps leaves a short slit above it.
+    boolean_touching_cylinders_short_slit => run "boolean/touching-cylinders-short-slit";
+    /// The same short slit from a single fuse of the three solids.
+    boolean_touching_cylinders_short_slit_many => run "boolean/touching-cylinders-short-slit-many";
+    /// Two tangent cylinders with flush caps, whose rims touch at both ends.
+    boolean_fuse_cylinders_tangent_equal_height => run "boolean/fuse-cylinders-tangent-equal-height";
+    /// A centred box whose side touches a cylinder between two box edges.
+    boolean_fuse_box_cylinder_tangent_side => run "boolean/fuse-box-cylinder-tangent-side";
+    /// Cutting the hinge barrel from the plate keeps the plate whole.
+    boolean_cut_box_cylinder_tangent_side => run "boolean/cut-box-cylinder-tangent-side";
+    /// Cutting the hinge plate from the barrel keeps the barrel whole.
+    boolean_cut_cylinder_box_tangent_side => run "boolean/cut-cylinder-box-tangent-side";
+    /// The hinge's common is Empty even though the parts touch along a ruling.
+    boolean_common_box_cylinder_tangent_side => run "boolean/common-box-cylinder-tangent-side";
     /// A pin touching a bore's wall from inside: the pin's wall is inside the
     /// bore, and the fuse is the bore with every id kept.
     boolean_pin_in_bore_fuse => run "boolean/pin-in-bore-fuse";
@@ -1738,6 +1842,10 @@ corpus_tests! {
     /// oracle's measurements, Open CASCADE's corner blends missing the
     /// rolling ball (ADR-0073).
     blend_rounded_block_oblique_top_fillet => run "blend/rounded-block-oblique-top-fillet";
+    /// A ring whose two top rims are both chamfered 2.5 on a face 4 wide: the contacts swap order, refused `BlendTooLarge`.
+    blend_chamfer_two_rims_use_up_face => run "blend/chamfer-two-rims-use-up-face";
+    /// The same ring chamfered on both rims and cut across by a cylinder: the chamfer's refusal ends the run, the cut never reached.
+    blend_chamfer_two_rims_use_up_face_then_cut => run "blend/chamfer-two-rims-use-up-face-then-cut";
     /// A 10-cube's top face pushed out by 2: a 10 × 10 × 12 block.
     offset_box_top_pushed => run "offset/box-top-pushed";
     /// A 10-cube's top face pulled in by 2: a 10 × 10 × 8 block.
@@ -1959,6 +2067,19 @@ corpus_tests! {
     /// as a part: its blend walked round the rim as a B-spline surface.
     #[ignore = "reader: not finished after 11 minutes on Open CASCADE's walked blend surface (docs/BACKLOG.md, a walked blend's file)"]
     regression_nurbs_cap_cylinder_rim_fillet_occt_step => run "regression/nurbs-cap-cylinder-rim-fillet-occt-step";
+    /// Open CASCADE's own STEP of `boolean/fuse-end-disc-tangent-to-wall`,
+    /// read as a part: two `VERTEX_POINT`s at the touch on the end rim.
+    #[ignore = "reader: #15: loop 0 of f0 is open at junction 2, the file's two VERTEX_POINTs at one point, (6, 0, 2), where the loop arrives at one and leaves at the other (docs/BACKLOG.md, the reader's coincident VERTEX_POINTs)"]
+    regression_fuse_end_disc_tangent_to_wall_occt_step => run "regression/fuse-end-disc-tangent-to-wall-occt-step";
+    /// `boolean/fuse-cylinder-tangent-inside-near-seam` with the ruling 1.4e-3
+    /// rad off the seams: the inner seam's crossing 2.35e-7 inside the rim,
+    /// the section's piece from it to the touch hugging the rim.
+    #[ignore = "checker: L5 f6 loop 0 intersects itself, the rim's chord from the touch crossing the short section piece's polygon near the cusp; the mesher refuses the face too (docs/BACKLOG.md, a loop with a cusp at a coarse chord)"]
+    regression_fuse_cylinder_tangent_inside_seam_cusp => run "regression/fuse-cylinder-tangent-inside-seam-cusp";
+    /// `boolean/fuse-cylinder-tangent-inside-near-seam` with the ruling 1e-9
+    /// rad off the seams, the touch merged into the outer seam's vertex.
+    #[ignore = "kernel bug: a cycle of the outer cap's arrangement does not turn once, the section leaving the merged vertex 4e-9 rad off the rim's direction, past the angular tie (docs/BACKLOG.md, a touch merged into a vertex)"]
+    regression_fuse_cylinder_tangent_inside_seam_hair => run "regression/fuse-cylinder-tangent-inside-seam-hair";
     /// Open CASCADE's STEP of a cylinder capped by a spherical dome, converted
     /// to B-splines: the cap's pole a vertex the reader finds no singular row
     /// for.
@@ -2086,6 +2207,29 @@ corpus_tests! {
     /// the bounds of a periodic NURBS; the
     /// corpus waits on the reader only.
     boolean_cylinder_prism_common_chamfer_cut_loops_intersect => run "boolean/cylinder-prism-common-chamfer-cut-loops-intersect";
+    /// Three unit cylinders on one plane, their axes at the corners of an
+    /// equilateral triangle of side 1, fused as a chain: the third meets an
+    /// edge on the end plane shared by two coplanar pieces of the first fuse,
+    /// imaged on its coincident face once, not once per piece.
+    boolean_chained_fuse_coplanar_cylinders => run "boolean/chained-fuse-coplanar-cylinders";
+    /// A bore of a hole's own width and a wider counterbore, the tools' tops
+    /// inside the part, cut in one call: an annular chamber round the hole.
+    /// The counterbore's top crosses the hole wall along the bore's rim, an
+    /// edge of a third operand imaged on both: that piece, never a section
+    /// edge beside it.
+    boolean_cut_many_bore_over_bore_of_its_width => run "boolean/cut-many-bore-over-bore-of-its-width";
+    /// Three boxes in an L on one plane fused as a chain: the same cause as
+    /// the cylinders'.
+    boolean_chained_fuse_coplanar_boxes_l => run "boolean/chained-fuse-coplanar-boxes-l";
+    /// Two coaxial cylinders of one radius and a box across them, fused in one
+    /// call: the low cylinder's top rim, imaged on the slab's top and the tall
+    /// wall, is that edge along its last block too, which ends at the rim's
+    /// own vertex, never a section edge beside it.
+    boolean_fuse_many_coaxial_cylinders_and_box => run "boolean/fuse-many-coaxial-cylinders-and-box";
+    /// A cylinder cut by three slots through its axis, 60 degrees apart, one
+    /// cut each: the third slot's floor is coincident with the pieces the
+    /// second one split. Genus 5.
+    boolean_three_slots_through_cylinder => run "boolean/three-slots-through-cylinder";
     /// The exact B-spline twin of a cylinder cut across by a slab: two
     /// lumps, every face NURBS, their nesting decided by boxes clipped to
     /// each face's own patch (ADR-0068).
@@ -2106,12 +2250,43 @@ corpus_tests! {
     /// is `Unsupported`. The desired answer is Open CASCADE's distance.
     #[ignore = "OpError::Unsupported: two off-axis cones' interiors need a solver in three unknowns (docs/BACKLOG.md, cone–cone off a common axis)"]
     regression_distance_cone_cone_refused => query "regression/distance-cone-cone-refused";
+    /// A cone apex touches the interior of a block face at one point.
+    #[ignore = "OpError::Unsupported: the cone apex is classified On at a crossing point with no section edge (docs/BACKLOG.md)"]
+    regression_interference_cone_apex_on_face => query "regression/interference-cone-apex-on-face";
     /// The ogive bar's ruling over a step: a cylinder against a cylinder below
     /// a ledge, a cylinder against a plane above, both filleted. The stripes
     /// meet at a vertex of five edges; Arris refuses the corner as `Degenerate`,
     /// where Open CASCADE builds it.
     #[ignore = "OpError::Degenerate: the corner at the end of a ruling blend whose neighbour in line is another ruling blend of a different face pair is not covered (docs/BACKLOG.md, the ruling chain over a ledge)"]
     regression_ogive_bar_step_chain_fillet => run "regression/ogive-bar-step-chain-fillet";
+    /// Two overlapping boxes standing on the plane z = 0, nowhere abutting
+    /// (the coplanar-solids property's shrunk draw): the union is one solid.
+    #[ignore = "OpError::Unsupported: plane against line, the bottoms' coplanar edge of one box against the other's face, for these numbers and not for nearly any others (the retired flat-edge-read-as-tangent-contact plan, step 6)"]
+    regression_two_boxes_on_one_plane_fuse_unsupported => run "regression/two-boxes-on-one-plane-fuse-unsupported";
+    /// Three boxes and a cylinder on one plane fused as a chain: every pair
+    /// and the n-ary call build, the chain's last step is refused.
+    #[ignore = "OpError::Unsupported: plane against line at the chain's last step, where the n-ary call builds (the retired flat-edge-read-as-tangent-contact plan, step 6)"]
+    regression_chained_fuse_three_boxes_and_cylinder_unsupported => run "regression/chained-fuse-three-boxes-and-cylinder-unsupported";
+    /// Three boxes on one plane fused in one call, two of them with one top
+    /// plane and the third's wall across both: every pair and the chain build.
+    #[ignore = "OpError::Unsupported: plane against plane, a low box's top against the tall box's wall at a right angle, where every pair and the chain build (the retired flat-edge-read-as-tangent-contact plan, step 8)"]
+    regression_fuse_many_three_boxes_plane_against_plane_unsupported => run "regression/fuse-many-three-boxes-plane-against-plane-unsupported";
+    /// A box, a unit cylinder tangent inside a slab's side and the slab, all on one plane, fused in one call: every pair and the chain build.
+    #[ignore = "OpError::Unsupported: no closed form for the cylinder against the plane, its wall tangent to the slab's side along a line inside the box, where every pair and the chain build (the retired tangency-faults plan)"]
+    regression_fuse_many_tangent_cylinder_plane_unsupported => run "regression/fuse-many-tangent-cylinder-plane-unsupported";
+
+    /// A rod tilted 1.5 tolerances from its coaxial bore should fuse.
+    #[ignore = "builder: the union has an edge with one use"]
+    regression_band_tilted_rod_fuse_open_edge => run "regression/band-tilted-rod-fuse-open-edge";
+    /// A rod tilted two tolerances from its coaxial bore gives no common at the oracle's tolerance.
+    #[ignore = "builder: the common has an edge with one use"]
+    regression_band_tilted_rod_common_open_edge => run "regression/band-tilted-rod-common-open-edge";
+    /// A pipe moved one tolerance away from its elbow should fuse within the band.
+    #[ignore = "builder: the union has an edge with one use"]
+    regression_band_elbow_pipe_fuse_open_edge => run "regression/band-elbow-pipe-fuse-open-edge";
+    /// Two boxes tilted by two tolerances across their contact edge should fuse.
+    #[ignore = "checker: the two result shells cross at B1"]
+    regression_band_tilted_edge_boxes_fuse_overlap => run "regression/band-tilted-edge-boxes-fuse-overlap";
 }
 
 /// A variant the recipe does not have fails naming it.

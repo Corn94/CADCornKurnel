@@ -1314,6 +1314,16 @@ pub struct BandPair {
     /// Where the contact is a line: its length and the radius of the
     /// relative curvature across it — zero for an edge on an edge.
     pub line: Option<(f64, f64)>,
+    /// The volume a tilt sweeps across the fixed solid per radian with
+    /// the moving solid's faces inside it, off the contact: the rate of
+    /// change of their common, `|∫ (hinge × (p − pivot)) · n dA|` over
+    /// those faces. A flat face of normal `n` sweeps its area times its
+    /// centroid's distance from the plane through the hinge along `n`.
+    /// Zero where no face lies inside, where all of the moving solid's
+    /// boundary does (a rigid motion keeps its volume), or where the
+    /// faces inside are symmetric about the pivot; a blind hole's bottom
+    /// cap, its centre a radius `r` off the hinge, sweeps `π r³`.
+    pub sweep: f64,
     /// The motion of both.
     pub pose: Isometry,
 }
@@ -1353,13 +1363,22 @@ impl BandPair {
     /// area times the offset, and along a line contact the strip the
     /// offset opens across it, `√(8ρδ)` wide, times the offset — plus,
     /// on a line of no curvature (an edge on an edge), the offset squared
-    /// along it.
+    /// along it — plus, under a tilt, what the moving solid's other faces
+    /// inside the fixed one sweep: [`BandPair::sweep`] times the angle,
+    /// `2δ / lever`. That last is the first-order change itself, not a
+    /// margin: a translation, or a face the pivot halves, sweeps none,
+    /// but a tilt turns a blind hole's bottom cap by its whole radius
+    /// about the hinge, `9πδ` at the tangent hole's fixture.
     pub fn volume_bound(&self, delta: f64) -> f64 {
         let d = delta.abs();
         let line = self.line.map_or(0.0, |(len, rho)| {
             len * d * (8.0 * rho * d).sqrt() + len * d * d
         });
-        self.area * d + line
+        let swept = match self.motion {
+            BandMotion::Tilt => self.sweep * 2.0 * d / self.lever,
+            BandMotion::Offset | BandMotion::Radius => 0.0,
+        };
+        self.area * d + line + swept
     }
 }
 
@@ -1635,6 +1654,29 @@ fn band_pair_from(
             )
         }
     };
+    // What a tilt sweeps across the fixed solid ([`BandPair::sweep`]).
+    let sweep = match (contact, moving) {
+        // The blind hole's bottom cap (normal −z, centre `radius` along x
+        // from the hinge) sweeps π r² · r; its wall inside, from z0 to
+        // pz, is halved by the pivot and sweeps none.
+        (BandContact::TangentHole, BandSolid::Rod { radius, .. }) => pi * radius * radius * radius,
+        // The pin lies wholly inside the bore; the bore's wall inside the
+        // cylinder is halved by the pivot; every other moving solid lies
+        // outside the fixed one but for the contact.
+        (
+            BandContact::TangentHole
+            | BandContact::FlushBoxes
+            | BandContact::FlushBoss
+            | BandContact::PinInBore
+            | BandContact::CoaxialRod
+            | BandContact::CoaxialBore
+            | BandContact::TangentCylinders
+            | BandContact::TangentOutside
+            | BandContact::PipeElbow
+            | BandContact::EdgeOnEdge,
+            _,
+        ) => 0.0,
+    };
     Some(BandPair {
         contact,
         motion: pick(motions)?,
@@ -1646,6 +1688,7 @@ fn band_pair_from(
         lever,
         area,
         line,
+        sweep,
         pose,
     })
 }
@@ -1958,7 +2001,7 @@ mod tests {
             prop_assert!((pair.normal.norm() - 1.0).abs() < 1e-12);
             prop_assert!((pair.hinge.norm() - 1.0).abs() < 1e-12);
             prop_assert!(pair.normal.dot(&pair.hinge).abs() < 1e-12);
-            prop_assert!(pair.lever > 0.0 && pair.area >= 0.0);
+            prop_assert!(pair.lever > 0.0 && pair.area >= 0.0 && pair.sweep >= 0.0);
             Ok(())
         });
     }
@@ -2198,4 +2241,107 @@ pub fn multi_cut() -> impl Strategy<Value = MultiCut> {
             tools,
             pose,
         })
+}
+
+/// What one solid of a [`Standing`] set is, before its motion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StandingShape {
+    /// A box `half` wide either way of its centre across `x` and `y`.
+    Box {
+        /// The half sides across `x` and `y`.
+        half: (f64, f64),
+    },
+    /// A cylinder on the `z` axis through its centre.
+    Cylinder {
+        /// The radius.
+        radius: f64,
+    },
+}
+
+/// One solid standing on the plane `z = 0`: its base on it, its axis
+/// above `centre`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StandingSolid {
+    /// The shape across `x` and `y`.
+    pub shape: StandingShape,
+    /// The centre of its base.
+    pub centre: (f64, f64),
+    /// The height above the plane.
+    pub height: f64,
+}
+
+/// A few boxes and cylinders standing on the plane `z = 0`: the operands of the chained fuse on a shared end plane (an
+/// image of an edge that lies in two coplanar faces of one operand, once
+/// per face). Half of the draws put sizes, centres and heights on whole
+/// numbers, so bases, tops and walls come out flush and the fuse meets the
+/// L of boxes and the equal-height chain; the other half are generic.
+/// A cylinder's wall may be tangent to another solid's wall or face, which
+/// the whole-number half makes common: the tangent contact is built or
+/// refused by name (the retired tangency-faults plan). They are not posed: a flush plane under a rotation is only flush to the
+/// pose's rounding, the tolerance band's own case (ADR-0022), which the
+/// standing sets leave to the band survey.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Standing {
+    /// The solids, in the order of the call.
+    pub solids: Vec<StandingSolid>,
+}
+
+impl Standing {
+    /// The solids as bodies of `m`.
+    pub fn build(&self, m: &mut Model) -> Result<Vec<Body>, OpError> {
+        self.solids
+            .iter()
+            .map(|s| match s.shape {
+                StandingShape::Box { half } => Boxed {
+                    min: Point3::new(s.centre.0 - half.0, s.centre.1 - half.1, 0.0),
+                    max: Point3::new(s.centre.0 + half.0, s.centre.1 + half.1, s.height),
+                    pose: Isometry::identity(),
+                }
+                .build(m),
+                StandingShape::Cylinder { radius } => Cylindrical {
+                    axis: Axis::z_at(Point3::new(s.centre.0, s.centre.1, 0.0)),
+                    radius,
+                    height: s.height,
+                    pose: Isometry::identity(),
+                }
+                .build(m),
+            })
+            .collect()
+    }
+}
+
+/// [`Standing`] sets of `count` solids, `count` in `counts`.
+pub fn standing_of(counts: RangeInclusive<usize>) -> impl Strategy<Value = Standing> {
+    // A value in `range`, generic or on a whole number.
+    fn grid(range: RangeInclusive<i32>, whole: bool) -> BoxedStrategy<f64> {
+        let (lo, hi) = (f64::from(*range.start()), f64::from(*range.end()));
+        if whole {
+            range.prop_map(f64::from).boxed()
+        } else {
+            finite_f64(lo..=hi).boxed()
+        }
+    }
+    let solid = |whole: bool| {
+        let shape = prop_oneof![
+            (grid(1..=3, whole), grid(1..=3, whole)).prop_map(|half| StandingShape::Box { half }),
+            grid(1..=3, whole).prop_map(|radius| StandingShape::Cylinder { radius }),
+        ];
+        (
+            shape,
+            (grid(-3..=3, whole), grid(-3..=3, whole)),
+            grid(1..=6, whole),
+        )
+            .prop_map(|(shape, centre, height)| StandingSolid {
+                shape,
+                centre,
+                height,
+            })
+    };
+    let set = |whole: bool| proptest::collection::vec(solid(whole), counts.clone());
+    prop_oneof![set(true), set(false)].prop_map(|solids| Standing { solids })
+}
+
+/// [`standing_of`] three to five solids.
+pub fn standing() -> impl Strategy<Value = Standing> {
+    standing_of(3..=5)
 }

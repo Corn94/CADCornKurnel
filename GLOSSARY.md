@@ -27,6 +27,13 @@ _Avoid_: surface body, open solid
 An outer shell with the voids it contains, derived from geometry and never
 stored (ADR-0006).
 
+**Touching lumps**:
+Lumps of one solid whose boundaries meet along curves where their surfaces
+touch, or at isolated points, never across or over an area (ADR-0088).
+Each lump keeps its own copy of a contact edge or vertex (ADR-0090).
+Open CASCADE's compound of touching solids.
+_Avoid_: compound, non-manifold solid
+
 **Precision**:
 The model-wide tolerance configuration: the default, the floor, and the
 maximum an operation may grow to.
@@ -153,6 +160,11 @@ open domain it is cut there and holds only the arms inside.
 
 **Common block**:
 A piece of edge two operands share within tolerance, kept as one edge.
+
+**Image**:
+A piece of an operand's edge that lies inside a face of the other operand,
+placed on that face so it splits it (`Interferences::images`). A piece
+is imaged on a face once, whichever pair of faces meets it.
 
 **Stripe**:
 The blend surface rolled along one edge between its two faces, in closed
@@ -407,6 +419,11 @@ An application that builds on Arris; **the first consumer** is the
 parametric CAD whose kernel facade Arris replaces.
 _Avoid_: client, user (a user is the consumer's)
 
+**Training harness**:
+A consumer that runs generated code-CAD programs through the binding and
+scores each body against a target by exact measures; its refusals over
+its benchmark corpus picked C12 (ADR-0020, amendment of 2026-11-16).
+
 **Facade**:
 The consumer's own interface over its kernel, behind which Arris is
 swapped in.
@@ -456,3 +473,8 @@ _Avoid_: orchestrator, driver, runner
 A step's grade read as the model class that executes it: 1 routine, 2
 careful, 3 unproven (`.agents/tiers.md`). A plan names tiers, never models.
 _Avoid_: level, model (a tier is mapped to a model by a harness's table)
+
+**Land** (a pull request):
+Take an outside pull request onto `main` through the maintainer's rebase
+and verification (ADR-0091).
+_Avoid_: merge (the button)

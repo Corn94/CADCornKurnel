@@ -3,9 +3,9 @@
 //! their paves and the hits that made them — at random poses of a box
 //! and a cylinder, and identical over two runs.
 
-use arris_debug::unmetered::{common, cut, fuse, interferences};
 use arris_debug::unmetered::{
-    mass_properties, primitive_box, primitive_cylinder, revolve, transform,
+    common, cut, extrude, fuse, fuse_many, interferences, interferences_many, mass_properties,
+    primitive_box, primitive_cylinder, revolve, transform,
 };
 use arris_debug::{corpus, fixtures, prop, sample};
 use arris_geom::{
@@ -250,6 +250,208 @@ fn a_disjoint_pair_and_a_tangent_touch_have_no_section() {
         (c.point - Point3::new(40.0, 15.0, 5.0)).norm() < 1e-9,
         "{i}"
     );
+}
+
+/// A 30 x 5 x 1 bar and a radius-3 boss of its height whose rim is
+/// tangent to the bar's end face `x = 15 * end` from inside, its centre at
+/// `x = 12 * end`, or from outside at `x = 18 * end`.
+fn bar_and_end_boss(end: f64, outside: bool) -> (Model, Body, Body) {
+    let mut m = Model::default();
+    let (bar, _) = primitive_box(&mut m, [-15.0, -2.5, -0.5], [15.0, 2.5, 0.5]).unwrap();
+    let centre = if outside { 18.0 } else { 12.0 } * end;
+    let axis = Axis::new(Point3::new(centre, 0.0, -0.5), Vec3::z()).unwrap();
+    let (boss, _) = primitive_cylinder(&mut m, axis, 3.0, 1.0).unwrap();
+    (m, bar, boss)
+}
+
+/// The boss's rim touches the bar's end edge at `(−15, 0, ±0.5)`, inside
+/// both edges, on the top and the bottom the two share. Where the rim runs
+/// inside the bar's face beside the touch, the touch is a vertex of both
+/// edges, which paves the end edge and the rim, and the end face's touch of
+/// the wall joins it: the bar's face keeps a corner on each side of it. A
+/// rim touching the end edge from outside runs inside neither face and
+/// splits nothing.
+#[test]
+fn a_rim_touching_an_edge_from_inside_its_face_is_a_vertex_of_both() {
+    let (m, bar, boss) = bar_and_end_boss(-1.0, false);
+    let i = interferences(&m, bar, boss).unwrap();
+    let touches: Vec<_> = i
+        .crossings
+        .iter()
+        .filter(|x| (x.point - Point3::new(-15.0, 0.0, x.point.z)).norm() < 1e-9)
+        .collect();
+    assert_eq!(touches.len(), 2, "{i}");
+    for x in touches {
+        let vertex = x.vertex.unwrap_or_else(|| panic!("{i}"));
+        assert!(!x.tangent, "{i}");
+        for edge in [x.a, x.b] {
+            assert!(i.paves[&edge].iter().any(|p| p.vertex == vertex), "{i}");
+        }
+        assert!(
+            i.hits
+                .iter()
+                .filter(|h| h.tangent)
+                .any(|h| h.vertex == Some(vertex)),
+            "{i}"
+        );
+    }
+
+    // At x = 15 from outside, so the rim's seam, at (21, 0), is not there.
+    let (m, bar, boss) = bar_and_end_boss(1.0, true);
+    let i = interferences(&m, bar, boss).unwrap();
+    assert!(!i.crossings.is_empty(), "{i}");
+    assert!(
+        i.crossings.iter().all(|x| x.tangent && x.vertex.is_none()),
+        "{i}"
+    );
+    assert!(i.vertices.is_empty(), "{i}");
+}
+
+/// The bar with a boss tangent to each end (`boolean/fuse-bar-end-bosses-tangent`):
+/// one boss then the other, in either order, either operand first, and
+/// both in one `fuse_many`, give the same body, clean at `Full`, with the
+/// closed form's volume. At `x = 15` the touch is the boss's seam vertex,
+/// at `x = −15` it lies inside both edges.
+#[test]
+fn bosses_tangent_to_both_ends_fuse_alike_in_any_order() {
+    let (d, r) = (2.5_f64, 3.0_f64);
+    let half = (r * r - d * d).sqrt();
+    let segment = r * r * real::atan2(half, d) - d * half;
+    let exact = 150.0 + 4.0 * segment;
+    let build = |order: usize| {
+        let mut m = Model::default();
+        let (bar, _) = primitive_box(&mut m, [-15.0, -2.5, -0.5], [15.0, 2.5, 0.5]).unwrap();
+        let [b1, b2] = [12.0, -12.0].map(|x| {
+            let axis = Axis::new(Point3::new(x, 0.0, -0.5), Vec3::z()).unwrap();
+            primitive_cylinder(&mut m, axis, r, 1.0).unwrap().0
+        });
+        let body = match order {
+            0 => {
+                let (one, _) = fuse(&mut m, bar, b1).unwrap();
+                fuse(&mut m, one, b2).unwrap().0
+            }
+            1 => {
+                let (one, _) = fuse(&mut m, bar, b2).unwrap();
+                fuse(&mut m, one, b1).unwrap().0
+            }
+            2 => {
+                let (one, _) = fuse(&mut m, b2, bar).unwrap();
+                fuse(&mut m, b1, one).unwrap().0
+            }
+            _ => fuse_many(&mut m, &[bar, b1, b2]).unwrap().0,
+        };
+        (m, body)
+    };
+    for order in 0..4 {
+        let (m, body) = build(order);
+        let report = check(&m, body, Level::Full);
+        assert!(
+            report.is_ok() && report.unchecked().is_empty(),
+            "order {order}: {report}"
+        );
+        assert_eq!(
+            arris_debug::dump::euler_line(&m, body).unwrap(),
+            "euler 30/62/34/34/1 g0 = 0",
+            "order {order}"
+        );
+        let volume = mass_properties(&m, body).unwrap().volume;
+        assert!(
+            (volume - exact).abs() < 1e-9 * exact,
+            "order {order}: {volume} against {exact}"
+        );
+    }
+}
+
+/// A 4 x 6 x 8 box bored along z by a cylinder of radius `r`, then a 1 x 1
+/// column through the bore cut away (`boolean/cut-bore-tangent-column` at
+/// `r = 0.5`). At 0.5 the bore touches each column wall along a ruling from
+/// inside it: the box's material lies on both sides of the ruling on the
+/// wall and the column's on both sides on the bore, so the ruling is no
+/// section on either face and each wall stays whole. At 0.45 the bore is
+/// inside the column; at 0.55 it reaches past each wall by a circular
+/// segment. Each is clean at `Full`, genus 1, with the closed form's volume.
+#[test]
+fn a_column_through_a_bore_it_touches_cuts_to_the_closed_form() {
+    for r in [0.45_f64, 0.5, 0.55] {
+        let mut m = Model::default();
+        let (bx, _) = primitive_box(&mut m, [-2.0, -3.0, -4.0], [2.0, 3.0, 4.0]).unwrap();
+        let axis = Axis::new(Point3::new(0.0, 0.0, 4.0), -Vec3::z()).unwrap();
+        let (bore, _) = primitive_cylinder(&mut m, axis, r, 20.0).unwrap();
+        let (bored, _) = cut(&mut m, bx, bore).unwrap();
+        let (column, _) = primitive_box(&mut m, [-0.5, -0.5, -10.0], [0.5, 0.5, 10.0]).unwrap();
+        let (body, _) = cut(&mut m, bored, column).unwrap();
+        let report = check(&m, body, Level::Full);
+        assert!(
+            report.is_ok() && report.unchecked().is_empty(),
+            "r = {r}: {report}"
+        );
+        assert_eq!(
+            report.euler().map(|e| e.genus),
+            Some(1),
+            "r = {r}: {report}"
+        );
+        // The hole's section is the unit square and, past each of its
+        // sides, the bore's segment beyond it.
+        let d = 0.5_f64;
+        let segment = if r > d {
+            r * r * real::acos(d / r) - d * (r * r - d * d).sqrt()
+        } else {
+            0.0
+        };
+        let exact = 4.0 * 6.0 * 8.0 - 8.0 * (1.0 + 4.0 * segment);
+        let volume = mass_properties(&m, body).unwrap().volume;
+        assert!(
+            (volume - exact).abs() < 1e-9 * exact,
+            "r = {r}: {volume} against {exact}"
+        );
+    }
+}
+
+/// A vertical unit cylinder, z 0..3 on x = 5, fused with a horizontal
+/// one of length `len` along x from −6 at z = 3
+/// (`boolean/fuse-end-disc-tangent-to-wall` at `len = 12`). At 12 its end
+/// disc, in x = 6, touches the vertical wall along a ruling, and the
+/// section ellipse through (6, 0, 2) touches the horizontal wall's end
+/// rim there: the order at that node is decided by the ellipse's own
+/// tangent, which its fitted pcurve misses by about a tenth of a
+/// micro-radian. At 12.5 and 14 the end disc stands clear. The vertical
+/// cylinder's part inside the horizontal one is 8/3 for every length
+/// from 12, and each wall loses 4 of its area to the other: V = 3π + lenπ
+/// − 8/3, A = 9π + 2π len − 8, clean at `Full` and genus 0.
+#[test]
+fn a_cylinder_whose_end_disc_touches_a_wall_fuses_to_the_closed_form() {
+    for len in [12.0_f64, 12.5, 14.0] {
+        let mut m = Model::default();
+        let up = Axis::new(Point3::new(5.0, 0.0, 0.0), Vec3::z()).unwrap();
+        let (vertical, _) = primitive_cylinder(&mut m, up, 1.0, 3.0).unwrap();
+        let along = Axis::new(Point3::new(-6.0, 0.0, 3.0), Vec3::x()).unwrap();
+        let (horizontal, _) = primitive_cylinder(&mut m, along, 1.0, len).unwrap();
+        let (body, _) = fuse(&mut m, vertical, horizontal).unwrap();
+        let report = check(&m, body, Level::Full);
+        assert!(
+            report.is_ok() && report.unchecked().is_empty(),
+            "len = {len}: {report}"
+        );
+        assert_eq!(
+            report.euler().map(|e| e.genus),
+            Some(0),
+            "len = {len}: {report}"
+        );
+        let pi = core::f64::consts::PI;
+        let measured = mass_properties(&m, body).unwrap();
+        let volume = 3.0 * pi + len * pi - 8.0 / 3.0;
+        let area = 9.0 * pi + 2.0 * pi * len - 8.0;
+        assert!(
+            (measured.volume - volume).abs() < 1e-9 * volume,
+            "len = {len}: {} against {volume}",
+            measured.volume
+        );
+        assert!(
+            (measured.area - area).abs() < 1e-9 * area,
+            "len = {len}: {} against {area}",
+            measured.area
+        );
+    }
 }
 
 #[test]
@@ -1282,63 +1484,307 @@ fn a_boolean_over_a_body_that_does_not_resolve_still_names_that_body() {
     }
 }
 
-/// Two boxes touching along an edge, and two touching at a corner, fused:
-/// the two lumps would share the edge — used by four faces — or the
-/// vertex, which a manifold solid's shells never do (ADR-0006, plan
-/// `⚠ OPEN` 2). Each is `InputReason::NonManifold` naming exactly what is
-/// shared, before anything is assembled, and the model is as it was.
+/// Two boxes meeting along an edge fuse as two lumps with separate
+/// copies of the edge and both endpoints (ADR-0090).
 #[test]
-fn boxes_touching_along_an_edge_or_at_a_corner_are_non_manifold() {
-    let corner = Point3::new(10.0, 10.0, 10.0);
-    for (what, min, max) in [
-        (
-            "edge",
-            Point3::new(10.0, 10.0, 0.0),
-            Point3::new(20.0, 20.0, 10.0),
-        ),
-        ("vertex", corner, Point3::new(20.0, 20.0, 20.0)),
-    ] {
-        let mut m = Model::default();
-        let (a, _) = primitive_box(&mut m, Point3::origin(), corner).unwrap();
-        let (b, _) = primitive_box(&mut m, min, max).unwrap();
-        let before = arris_debug::dump_text(&m, a).unwrap();
-        let entities = match fuse(&mut m, a, b) {
-            Err(OpError::Degenerate {
-                reason: Reason::Input(InputReason::NonManifold),
-                entities,
-            }) => entities,
-            other => panic!("{what}: {other:?}"),
-        };
-        // Where the entity sits: the edge along x = y = 10, or the corner.
-        let on_the_touch = |p: Point3| (p.x - 10.0).abs() < 1e-9 && (p.y - 10.0).abs() < 1e-9;
-        match (what, entities.as_slice()) {
-            (
-                "edge",
-                [
-                    Shape {
-                        id: EntityId::Edge(e),
-                        ..
-                    },
-                ],
-            ) => {
-                let edge = m.edge(*e).unwrap();
-                for v in [edge.start(), edge.end()] {
-                    assert!(on_the_touch(m.vertex(v).unwrap().point()), "{what}");
-                }
-            }
-            (
-                "vertex",
-                [
-                    Shape {
-                        id: EntityId::Vertex(v),
-                        ..
-                    },
-                ],
-            ) => assert_eq!(m.vertex(*v).unwrap().point(), corner),
-            other => panic!("{what}: {other:?}"),
+fn boxes_touching_along_an_edge_give_two_lumps_with_provenance() {
+    let (mut m, a, b) = inputs("boolean/edge-touching-fuse");
+    let on_contact = |v| {
+        let point = m.vertex(v).unwrap().point();
+        point.x == 10.0 && point.y == 10.0
+    };
+    let input_edges = [a, b].map(|body| {
+        m.edges(body)
+            .unwrap()
+            .into_iter()
+            .find(|edge| {
+                let edge = m.edge(edge.id).unwrap();
+                on_contact(edge.start()) && on_contact(edge.end())
+            })
+            .unwrap()
+            .id
+    });
+    let input_vertices = input_edges.map(|id| {
+        let edge = m.edge(id).unwrap();
+        [edge.start(), edge.end()]
+    });
+
+    let (body, p) = fuse(&mut m, a, b).unwrap();
+    let report = check(&m, body, Level::Full);
+    assert!(report.is_ok() && report.unchecked().is_empty(), "{report}");
+    assert_eq!(arris_check::lumps(&m, body).unwrap().len(), 2);
+    arris_topo::provenance::audit(&m, &[a, b], body, &p).unwrap();
+    let copies = p.modified_from(shape(input_edges[0]));
+    assert_eq!(copies.len(), 2);
+    assert_eq!(copies, p.modified_from(shape(input_edges[1])));
+
+    let edge_vertices: Vec<_> = copies
+        .iter()
+        .map(|copy| {
+            let EntityId::Edge(edge) = copy.id else {
+                panic!("expected a contact edge, got {copy:?}");
+            };
+            let edge = m.edge(edge).unwrap();
+            [edge.start(), edge.end()]
+        })
+        .collect();
+    for input in input_vertices.into_iter().flatten() {
+        let point = m.vertex(input).unwrap().point();
+        let images = p.modified_from(shape(input));
+        assert_eq!(images.len(), 2);
+        for ends in &edge_vertices {
+            assert_eq!(
+                ends.iter()
+                    .filter(|&&v| m.vertex(v).unwrap().point() == point)
+                    .filter(|&&v| images.contains(&shape(v)))
+                    .count(),
+                1
+            );
         }
-        assert_eq!(arris_debug::dump_text(&m, a).unwrap(), before, "{what}");
     }
+}
+
+fn polygon_prism(m: &mut Model, xy: &[[f64; 2]], base: f64, length: f64) -> Body {
+    let profile = Profile {
+        plane: Frame::new(Point3::new(0.0, 0.0, base), Vec3::z(), Vec3::x()).unwrap(),
+        outer: ProfileLoop::Path {
+            start: Point2::from(xy[0]),
+            segments: xy[1..]
+                .iter()
+                .chain(&xy[..1])
+                .map(|&p| ProfileSegment::LineTo(Point2::from(p)))
+                .collect(),
+        },
+        holes: Vec::new(),
+    };
+    extrude(m, &profile, Vec3::z(), length).unwrap().0
+}
+
+/// Three wedges meet on the z axis. The second wedge's edge represents
+/// the third's in a common block and has its own block with the first.
+/// Open CASCADE (cadquery-ocp 8.0.1.0.0) returns three solids sharing
+/// the axis edge, with total volume 70.
+#[test]
+fn a_common_block_can_use_another_blocks_source_as_representative() {
+    let mut m = Model::default();
+    let wedges = [
+        [[0.0, 0.0], [4.0, 0.0], [4.0, 2.0]],
+        [[0.0, 0.0], [-4.0, 1.0], [-4.0, 0.0]],
+        [[0.0, 0.0], [4.0, -1.0], [4.0, -0.5]],
+    ]
+    .map(|xy| polygon_prism(&mut m, &xy, 0.0, 10.0));
+    for order in [wedges, [wedges[2], wedges[1], wedges[0]]] {
+        let pave = interferences_many(&m, &order).unwrap();
+        assert_eq!(pave.blocks.len(), 2, "{pave}");
+        assert_eq!(pave.blocks[0].b, pave.blocks[1].a, "{pave}");
+    }
+}
+
+/// A triangular void reaches the reentrant edge of an L-shaped prism.
+/// Open CASCADE (cadquery-ocp 8.0.1.0.0) returns one solid of volume 2976
+/// with two shells and one shared edge, (0, 0, 2) to (0, 0, 8), used by
+/// four faces. ADR-0090 refuses this contact within one lump.
+#[test]
+fn a_void_touching_the_outer_shell_at_a_shared_edge_names_the_edge() {
+    let mut m = Model::default();
+    let target = polygon_prism(
+        &mut m,
+        &[
+            [-10.0, -10.0],
+            [10.0, -10.0],
+            [10.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 10.0],
+            [-10.0, 10.0],
+        ],
+        0.0,
+        10.0,
+    );
+    let tool = polygon_prism(&mut m, &[[0.0, 0.0], [-4.0, 0.0], [-2.0, -2.0]], 2.0, 6.0);
+
+    let pave = interferences(&m, target, tool).unwrap();
+    assert_eq!(pave.blocks.len(), 1, "{pave}");
+    let contact = pave.blocks[0].a.0;
+    let edge = m.edge(contact).unwrap();
+    let [a, b] = [edge.start(), edge.end()].map(|v| m.vertex(v).unwrap().point());
+    assert_eq!([a.x, a.y, b.x, b.y], [0.0; 4]);
+    assert_eq!([a.z.min(b.z), a.z.max(b.z)], [0.0, 10.0]);
+    match cut(&mut m, target, tool).unwrap_err() {
+        OpError::Degenerate {
+            reason: Reason::Input(InputReason::NonManifold),
+            entities,
+        } => assert_eq!(entities, [shape(contact)]),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A bridge that only covers part of the contact names both copied
+/// operand edges, including when the result splits them.
+#[test]
+fn a_partial_bridge_names_the_two_inherited_contact_edges() {
+    let (mut m, touching, bridge) = inputs("boolean/edge-touching-exposed-join");
+    let mut copies: Vec<_> = touching_box_edge_copies(&m, touching)
+        .into_iter()
+        .map(shape)
+        .collect();
+    copies.sort_unstable();
+    assert_eq!(copies.len(), 2);
+    match fuse(&mut m, touching, bridge).unwrap_err() {
+        OpError::Degenerate {
+            reason: Reason::Input(InputReason::NonManifold),
+            entities,
+        } => assert_eq!(entities, copies),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Joining two shells remotely must refuse their unjoined corners within
+/// vertex tolerance. Assemble the input from already separate shells so
+/// their corners keep their distinct positions and ids.
+#[test]
+fn a_remote_bridge_refuses_inherited_corners_within_vertex_tolerance() {
+    let mut m = Model::default();
+    let corner = Point3::new(10.0, 10.0, 10.0);
+    let separated = corner + Vec3::repeat(m.precision().default_tolerance / 2.0);
+    let (a, _) = primitive_box(&mut m, Point3::origin(), corner).unwrap();
+    let (b, _) = primitive_box(&mut m, separated, Point3::new(20.0, 20.0, 20.0)).unwrap();
+    let mut corners = [(a, corner), (b, separated)].map(|(body, point)| {
+        m.vertices(body)
+            .unwrap()
+            .into_iter()
+            .find(|v| m.vertex(v.id).unwrap().point() == point)
+            .map(|v| shape(v.id))
+            .unwrap()
+    });
+    corners.sort_unstable();
+    let shells = [a, b]
+        .into_iter()
+        .flat_map(|body| m.shells(body).unwrap())
+        .collect();
+    let body = Body::forward(m.raw().add_body(arris_topo::entity::Body::solid(shells)));
+    let report = check(&m, body, Level::Full);
+    assert!(report.is_ok() && report.unchecked().is_empty(), "{report}");
+    assert_eq!(lumps(&m, body).unwrap().len(), 2);
+    let before = arris_debug::dump_text(&m, body).unwrap();
+
+    let (first, _) = primitive_box(&mut m, [4.0, 4.0, 9.0], [6.0, 6.0, 16.0]).unwrap();
+    let (second, _) = primitive_box(&mut m, [5.0, 5.0, 14.0], [12.0, 12.0, 16.0]).unwrap();
+    match fuse_many(&mut m, &[body, first, second]).unwrap_err() {
+        OpError::Degenerate {
+            reason: Reason::Input(InputReason::NonManifold),
+            entities,
+        } => assert_eq!(entities, corners),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(arris_debug::dump_text(&m, body).unwrap(), before);
+}
+
+/// A V4 pair already present in an operand shell can survive a disjoint
+/// fuse with its points, tolerances and vertex ids intact.
+#[test]
+fn a_disjoint_fuse_preserves_a_preexisting_pair_within_vertex_tolerance() {
+    use arris_topo::builder::{Assembly, Builder, KeepGeometry, VertexSpec};
+    use arris_topo::entity::BodyKind;
+
+    let mut m = Model::default();
+    let precision = m.precision();
+    let width = precision.max_tolerance * 0.4;
+    let (prism, _) = primitive_box(&mut m, [0.0; 3], [width, width, 10.0]).unwrap();
+    let (mut assembly, _) = Assembly::of_body(&mut m, prism, &mut KeepGeometry).unwrap();
+    for vertex in &mut assembly.vertices {
+        if let VertexSpec::New { point, tolerance } = vertex
+            && *point == Point3::origin()
+        {
+            *tolerance = precision.max_tolerance;
+        }
+    }
+    let (builder, _) = Builder::assemble(&m, precision.default_tolerance, assembly).unwrap();
+    let a = builder.finish(&mut m, BodyKind::Solid).unwrap().body;
+    let report = check(&m, a, Level::Full);
+    assert!(report.is_ok() && report.unchecked().is_empty(), "{report}");
+    let pairs = arris_check::coincident_vertices(&m, a).unwrap();
+    assert_eq!(pairs.len(), 1);
+
+    let (b, _) = primitive_box(&mut m, [100.0; 3], [110.0; 3]).unwrap();
+    let (joined, provenance) = fuse(&mut m, a, b).unwrap();
+    assert_eq!(lumps(&m, joined).unwrap().len(), 2);
+    assert_eq!(arris_check::coincident_vertices(&m, joined).unwrap(), pairs);
+    for vertex in pairs.into_iter().flatten() {
+        assert!(provenance.is_kept(shape(vertex), &m, joined));
+    }
+    let report = check(&m, joined, Level::Full);
+    assert!(report.is_ok() && report.unchecked().is_empty(), "{report}");
+}
+
+/// The full bridge drops both copies of the buried edge and its endpoints.
+#[test]
+fn a_full_bridge_drops_the_inherited_contact_entities() {
+    let (mut m, touching, bridge) = inputs("boolean/edge-touching-covered-join");
+    let copies = touching_box_edge_copies(&m, touching);
+    assert_eq!(copies.len(), 2);
+    let (joined, provenance) = fuse(&mut m, touching, bridge).unwrap();
+    assert_eq!(lumps(&m, joined).unwrap().len(), 1);
+    for id in copies {
+        let edge = m.edge(id).unwrap();
+        assert!(provenance.is_deleted(shape(id)));
+        assert!(provenance.is_deleted(shape(edge.start())));
+        assert!(provenance.is_deleted(shape(edge.end())));
+    }
+}
+
+/// The two original edges of the touching box recipes, at x = y = 10.
+fn touching_box_edge_copies(m: &Model, body: Body) -> Vec<EdgeId> {
+    m.edges(body)
+        .unwrap()
+        .into_iter()
+        .filter(|edge| {
+            let edge = m.edge(edge.id).unwrap();
+            [edge.start(), edge.end()].into_iter().all(|id| {
+                let point = m.vertex(id).unwrap().point();
+                point.x == 10.0 && point.y == 10.0
+            })
+        })
+        .map(|edge| edge.id)
+        .collect()
+}
+
+/// The two cubes retain their own copies of the touching corner.
+#[test]
+fn boxes_touching_at_a_corner_give_two_lumps_with_provenance() {
+    let corner = Point3::new(10.0, 10.0, 10.0);
+    let mut m = Model::default();
+    let (a, _) = primitive_box(&mut m, Point3::origin(), corner).unwrap();
+    let (b, _) = primitive_box(&mut m, corner, Point3::new(20.0, 20.0, 20.0)).unwrap();
+    let source_vertices = [a, b].map(|body| {
+        m.vertices(body)
+            .unwrap()
+            .into_iter()
+            .find(|v| m.vertex(v.id).unwrap().point() == corner)
+            .unwrap()
+            .id
+    });
+    let before = arris_debug::dump_text(&m, a).unwrap();
+    let (body, p) = fuse(&mut m, a, b).unwrap();
+    let report = check(&m, body, Level::Full);
+    assert!(report.is_ok() && report.unchecked().is_empty(), "{report}");
+    assert_eq!(lumps(&m, body).unwrap().len(), 2);
+    let volume = mass_properties(&m, body).unwrap().volume;
+    assert!((volume - 2000.0).abs() < 1e-9 * 2000.0, "{volume}");
+    arris_topo::provenance::audit(&m, &[a, b], body, &p).unwrap();
+    let copies: Vec<_> = m
+        .vertices(body)
+        .unwrap()
+        .into_iter()
+        .filter(|v| m.vertex(v.id).unwrap().point() == corner)
+        .map(|v| shape(v.id))
+        .collect();
+    assert_eq!(copies.len(), 2);
+    for source in source_vertices {
+        let images = p.modified_from(shape(source));
+        assert_eq!(images.len(), 2);
+        assert!(copies.iter().all(|copy| images.contains(copy)));
+    }
+    assert_eq!(arris_debug::dump_text(&m, a).unwrap(), before);
 }
 
 /// A tool that splits its target leaves two lumps of one solid
@@ -1754,12 +2200,13 @@ fn a_posed_through_hole_is_the_through_hole_moved() {
 /// ruling, classified `On` the wall, and the curvature rule puts the
 /// face outside the rod; `common` selects nothing, `BooleanReason::Empty` and
 /// not `ZeroThickness`, since no piece lay *on* the other operand in the
-/// coincident sense; `fuse` would keep the face and the wall touching
-/// along the contact, the designed refusal naming the pair. And the
-/// blind hole whose wall touches a side face from inside refuses the
-/// same way through `cut`, before any face is split.
+/// coincident sense; `fuse` keeps the face and the wall touching along
+/// the contact, two lumps of one solid that touch (ADR-0088), each keeping
+/// its own faces. And the blind hole whose wall touches a side face from
+/// inside refuses with `TangentContact` through `cut`, before any face is
+/// split: one shell would touch itself.
 #[test]
-fn a_touch_from_outside_is_the_plate_and_a_slit_is_refused_by_name() {
+fn a_touch_from_outside_is_the_plate_and_a_touch_in_one_shell_is_refused_by_name() {
     let (mut m, plate, post) = inputs("boolean/tangent-outside-cut");
     let before = arris_debug::dump_text(&m, plate).unwrap();
     let (body, p) = cut(&mut m, plate, post).unwrap();
@@ -1786,19 +2233,25 @@ fn a_touch_from_outside_is_the_plate_and_a_slit_is_refused_by_name() {
         }) => {}
         other => panic!("common: {other:?}"),
     }
-    match fuse(&mut m, plate, post) {
-        Err(OpError::Degenerate {
-            reason: Reason::Boolean(BooleanReason::TangentContact),
-            entities,
-        }) => {
-            let plate_faces: Vec<_> = m.faces(plate).unwrap().iter().map(|f| f.id).collect();
-            let post_faces: Vec<_> = m.faces(post).unwrap().iter().map(|f| f.id).collect();
-            assert_eq!(entities.len(), 2, "{entities:?}");
-            assert!(matches!(entities[0].id, EntityId::Face(f) if plate_faces.contains(&f)));
-            assert!(matches!(entities[1].id, EntityId::Face(f) if post_faces.contains(&f)));
-        }
-        other => panic!("fuse: {other:?}"),
-    }
+    let (plate_volume, post_volume) = (
+        mass_properties(&m, plate).unwrap().volume,
+        mass_properties(&m, post).unwrap().volume,
+    );
+    let (fused, _) = fuse(&mut m, plate, post).unwrap();
+    let report = check(&m, fused, Level::Full);
+    assert!(report.is_ok() && report.unchecked().is_empty(), "{report}");
+    assert_eq!(m.shells(fused).unwrap().len(), 2, "two lumps that touch");
+    let volume = mass_properties(&m, fused).unwrap().volume;
+    assert!(
+        (volume - plate_volume - post_volume).abs() <= 1e-9 * volume,
+        "the volumes add: {volume} vs {plate_volume} + {post_volume}"
+    );
+    let plate_faces: Vec<_> = m.faces(plate).unwrap().iter().map(|f| f.id).collect();
+    let kept: Vec<_> = m.faces(fused).unwrap().iter().map(|f| f.id).collect();
+    assert!(
+        plate_faces.iter().all(|f| kept.contains(f)),
+        "every face of the plate is kept by id"
+    );
 
     let (mut m, plate, hole) = inputs("boolean/tangent-hole");
     let before = arris_debug::dump_text(&m, plate).unwrap();
@@ -1966,4 +2419,180 @@ fn a_wall_pinched_at_a_singular_point_is_non_manifold() {
         other => panic!("{other:?}"),
     }
     assert_eq!(arris_debug::dump_text(&m, main).unwrap(), before);
+}
+
+/// A box and its sides split by a plane and fused back share the box's top
+/// and bottom faces by id, with their edges and vertices: every boolean of
+/// the two, and of the box with one side, builds checker-clean with its
+/// record audited against both operands' ids, the way a box fused from
+/// two boxes does (`query/interference-box-against-its-split-and-fused-sides`).
+#[test]
+fn operands_that_share_entities_build_with_their_own_ids() {
+    use arris_check::{Level, check};
+    use arris_debug::unmetered::split;
+    use arris_topo::provenance::audit;
+
+    type Op = fn(&mut Model, Body, Body) -> Result<(Body, arris_topo::Provenance), OpError>;
+    let mut m = Model::default();
+    let (whole, _) = primitive_box(&mut m, Point3::origin(), Point3::new(2.0, 2.0, 1.0)).unwrap();
+    let plane = Frame::from_z(Point3::new(0.0, 0.0, 0.5), Vec3::z()).unwrap();
+    let sides = split(&mut m, whole, &plane).unwrap();
+    let (back, _) = fuse(&mut m, sides.positive, sides.negative).unwrap();
+    let shared = m.closure(whole).unwrap().faces;
+    assert!(
+        m.closure(back)
+            .unwrap()
+            .faces
+            .iter()
+            .any(|f| shared.contains(f)),
+        "the fused sides keep a face of the box by id"
+    );
+    let cases: [(&str, Op, Body, Body, f64); 7] = [
+        ("common of the box and its sides", common, whole, back, 4.0),
+        ("fuse of the box and its sides", fuse, whole, back, 4.0),
+        (
+            "common of the box and a side",
+            common,
+            whole,
+            sides.positive,
+            2.0,
+        ),
+        (
+            "common of a side and the box",
+            common,
+            sides.positive,
+            whole,
+            2.0,
+        ),
+        (
+            "cut of a side from the box",
+            cut,
+            whole,
+            sides.positive,
+            2.0,
+        ),
+        (
+            "fuse of the box and a side",
+            fuse,
+            whole,
+            sides.positive,
+            4.0,
+        ),
+        (
+            "cut of a side from the sides",
+            cut,
+            back,
+            sides.negative,
+            2.0,
+        ),
+    ];
+    for (name, op, a, b, volume) in cases {
+        let (r, p) = op(&mut m, a, b).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            check(&m, r, Level::Full).is_ok(),
+            "{name}: not clean at Full"
+        );
+        audit(&m, &[a, b], r, &p).unwrap_or_else(|e| panic!("{name}: {e}"));
+        // A shared entity the result holds by id is kept: the copy's
+        // reading of it is no record of it.
+        let (ca, cb, cr) = (
+            m.closure(a).unwrap(),
+            m.closure(b).unwrap(),
+            m.closure(r).unwrap(),
+        );
+        let shared: Vec<Shape> = (ca.vertices.iter())
+            .filter(|v| cb.vertices.contains(v) && cr.vertices.contains(v))
+            .map(|&v| Shape::new(v, Orientation::Forward))
+            .chain(
+                (ca.edges.iter())
+                    .filter(|e| cb.edges.contains(e) && cr.edges.contains(e))
+                    .map(|&e| Shape::new(e, Orientation::Forward)),
+            )
+            .chain(
+                (ca.faces.iter())
+                    .filter(|f| cb.faces.contains(f) && cr.faces.contains(f))
+                    .map(|&f| Shape::new(f, Orientation::Forward)),
+            )
+            .collect();
+        for s in shared {
+            assert!(p.is_kept(s, &m, r), "{name}: shared {s:?} not kept");
+        }
+        let v = mass_properties(&m, r).unwrap().volume;
+        assert!((v - volume).abs() < 1e-9 * volume, "{name}: volume {v}");
+        // The copy the boolean ran on is discarded: its body's slot,
+        // below the result's, is the next one a body takes.
+        let (next, _) =
+            primitive_box(&mut m, Point3::origin(), Point3::new(1.0, 1.0, 1.0)).unwrap();
+        assert!(
+            next.id.index() < r.id.index(),
+            "{name}: the copy was left in the model"
+        );
+    }
+    // A refusal names the caller's bodies, not the copy it was decomposed
+    // on.
+    match cut(&mut m, sides.positive, whole) {
+        Err(OpError::Degenerate { entities, .. }) => {
+            let named: Vec<_> = entities.iter().map(|s| s.id).collect();
+            assert_eq!(named, [sides.positive.id.into(), whole.id.into()]);
+        }
+        other => panic!("cut of the box from a side: {other:?}"),
+    }
+}
+
+/// A frustum (radius 3 at z = 0, 2 at z = 4) and a 2 x 2 x 2 box standing
+/// on its top plane touch at one point of the top rim, where the rim meets
+/// the box's bottom edge from outside both faces: at the revolve's seam
+/// (+x), inside the rim edge (-x), and at either side of the axis for a lug
+/// turned 90 degrees. Each lump has its own vertex at the touch,
+/// whichever operand comes first.
+#[test]
+fn a_frustum_and_a_box_touching_at_a_rim_point_give_two_lumps() {
+    let p = |u, v| Point2::new(u, v);
+    let section = Profile {
+        plane: Frame::new(Point3::origin(), -Vec3::y(), Vec3::x()).unwrap(),
+        outer: ProfileLoop::Path {
+            start: p(0.0, 0.0),
+            segments: vec![
+                ProfileSegment::LineTo(p(3.0, 0.0)),
+                ProfileSegment::LineTo(p(2.0, 4.0)),
+                ProfileSegment::LineTo(p(0.0, 4.0)),
+                ProfileSegment::LineTo(p(0.0, 0.0)),
+            ],
+        },
+        holes: Vec::new(),
+    };
+    for (min, max, touch) in [
+        ([2.0, -1.0, 4.0], [4.0, 1.0, 6.0], [2.0, 0.0, 4.0]),
+        ([-4.0, -1.0, 4.0], [-2.0, 1.0, 6.0], [-2.0, 0.0, 4.0]),
+        ([-1.0, 2.0, 4.0], [1.0, 4.0, 6.0], [0.0, 2.0, 4.0]),
+        ([-1.0, -4.0, 4.0], [1.0, -2.0, 6.0], [0.0, -2.0, 4.0]),
+    ] {
+        for frustum_first in [true, false] {
+            let mut m = Model::default();
+            let (frustum, _) =
+                revolve(&mut m, &section, Axis::z_at(Point3::origin()), TAU).unwrap();
+            let (lug, _) = primitive_box(&mut m, min, max).unwrap();
+            let result = if frustum_first {
+                fuse(&mut m, frustum, lug)
+            } else {
+                fuse(&mut m, lug, frustum)
+            };
+            let (body, provenance) = result.unwrap_or_else(|e| panic!("{min:?}: {e}"));
+            let report = check(&m, body, Level::Full);
+            assert!(
+                report.is_ok() && report.unchecked().is_empty(),
+                "{min:?}: {report}"
+            );
+            assert_eq!(lumps(&m, body).unwrap().len(), 2, "{min:?}");
+            let touch = Point3::from(touch);
+            let copies = m
+                .vertices(body)
+                .unwrap()
+                .into_iter()
+                .filter(|v| (m.vertex(v.id).unwrap().point() - touch).norm() < 1e-9)
+                .count();
+            assert_eq!(copies, 2, "{min:?}");
+            arris_topo::provenance::audit(&m, &[frustum, lug], body, &provenance).unwrap();
+        }
+    }
 }

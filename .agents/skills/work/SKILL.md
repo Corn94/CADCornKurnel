@@ -72,6 +72,8 @@ miss); reporting after one step and waiting for another `/work` is a bug.
 - One step per commit, its box ticked only when its test ran.
 - No foreground wait: no `until`, `while` or `sleep` loop on a gate, a test
   run or CI. The completion notification is the wait.
+- A classifier "no verdict" error is transient: retry the identical call
+  once; don't rewrite the command into variants.
 - A failing hook is fixed, or the step stops and says why; `--no-verify`
   is never the way past it.
 - A case that will not pass with the design as written is an open question
@@ -90,7 +92,10 @@ miss); reporting after one step and waiting for another `/work` is a bug.
 1. Read the plan; for each unchecked step note its tier: its grade, or
    the tier it names (`**[1, tier 3]**`). A **[CI]** step stops the
    conductor before it starts: its push is the human's.
-2. For each step in order, start one fresh subagent on the step's tier
+2. For each step in order, include a short reading list in the handoff:
+   applicable repository rules, relevant ADRs and design sections, and
+   source entry points. The step agent follows references as needed.
+   Start one fresh subagent on the step's tier
    (`.agents/tiers.md` says how in this harness), and wait for its
    hand-back: the harness delivers it, never a poll of its output. Its prompt: "Work step N of `docs/plans/<slug>.md` in this
    checkout by *Do* in `.agents/skills/work/SKILL.md`, that one step only,
@@ -98,19 +103,20 @@ miss); reporting after one step and waiting for another `/work` is a bug.
    under `timeout` if it ends within 3 minutes, else with
    `run_in_background`, and you end your turn only when the commit is in
    `git log -1`, never while a run or the commit's hook is pending; the
-   commit's test half is not yours to wait for. You answer to the conductor, never the human:
+   commit's test half is not yours to wait for. Never `until`/`while`/`sleep`
+   in Bash or Monitor; `tools/verify.sh --status` waits for you. You answer to the conductor, never the human:
    hand back the commit id and anything surprising, or the question that
    stopped you." The conductor writes no code itself; it alone talks to
    the human.
-   A notice that the subagent "is waiting on its own background work" is
-   interim, not a hand-back: send nothing, its own job's notification
-   resumes it (steps 3–6 of rewrite-seams did, after four nudges for
-   nothing). Every wait on a subagent or the gate also sets a
-   `ScheduleWakeup` of 20 minutes or more, so a lost notification costs one
-   interval, not the session: about 60 on the full gate, its prompt one
-   line ("conductor fallback for `<slug>`: check the hand-back or gate; if
-   none, set the next wakeup"), never `/work <slug>`, which loads this
-   skill again.
+   A notice that the subagent is waiting on its own background work is
+   interim. The job owner reports the pinned SHA, expected finish, exit-status
+   path and log path when starting a long job. Use the harness exit result
+   when it retains one. The conductor waits for the owner; the owner opens
+   the log on failure or at the first check after a missed expected finish. In Claude Code, use the harness
+   notification and set a one-line `ScheduleWakeup` fallback after at
+   least 20 minutes (about 60 for a full gate). In Codex, use the longest
+   available interruptible `wait_agent` timeout appropriate to the step.
+   Follow the job-wait rule in `.agents/rules/git.md` for command jobs.
 3. On each hand-back, check what landed: the last commit names `(plans/<slug>
    step N)`, the plan has step N ticked, `git status` is clean. Its test
    half may still be running: that is not a failure, and the next hook or
@@ -124,13 +130,13 @@ miss); reporting after one step and waiting for another `/work` is a bug.
 4. After the last box, read `tools/verify.sh --status` for HEAD, waiting on
    a run in flight. `pass` is the plan's tip verified. `fail` is an earlier
    step's red: a fresh subagent on that step's tier fixes it in a commit
-   carrying that step's suffix, before retirement. Then retire the plan in
-   this session by reading and following
-   `.agents/skills/retire-plan/SKILL.md` (the Skill tool refuses
-   `/retire-plan`; never call it); its review subagent runs on
-   tier 3. A hard finding goes to a fresh subagent on the tier of the step
-   it repairs, the finding as its brief; the conductor commits only the
-   retirement.
+   carrying that step's suffix, before retirement. Start a fresh
+   retirement coordinator with only the slug, verified SHA, acceptance
+   commands and docs checklist from the plan, and the path to
+   `.agents/skills/retire-plan/SKILL.md`. Use a fresh agent when it can
+   delegate the review and fixes on their specified tiers. Where nesting
+   cannot do that, hand off to a fresh top-level session with the same
+   brief. Wait for its hand-back using the harness rule above.
 5. Reply as *Do*'s step 7 does, one line per step conducted (its commit,
    its tier, anything surprising), then the retirement's reply.
 

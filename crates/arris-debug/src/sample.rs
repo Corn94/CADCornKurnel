@@ -114,7 +114,34 @@ pub fn unit_box(m: &mut Model) -> Result<Body, SampleError> {
 /// assert_eq!(m.edges(b).unwrap().len(), 12);
 /// ```
 pub fn cuboid(m: &mut Model, min: Point3, max: Point3) -> Result<Body, SampleError> {
-    cuboid_with(m, min, max, Flavour::Analytic)
+    cuboid_with(m, min, max, Flavour::Analytic, None)
+}
+
+/// [`cuboid`] with its eight vertices at `vertex_tolerance` while its
+/// edges and faces keep the model's `default_tolerance`: the shape of a
+/// part whose corners were welded loosely. Each vertex is stored off its
+/// corner, outward along the diagonal, 0.95 of its tolerance from where
+/// its edges end. Errors as [`cuboid`], and a
+/// `vertex_tolerance` that is not finite and positive.
+///
+/// ```
+/// use arris_debug::sample;
+/// use arris_topo::Model;
+/// use arris_math::Point3;
+///
+/// let mut m = Model::default();
+/// let b = sample::cuboid_loose_vertices(&mut m, Point3::origin(), Point3::new(4.0, 3.0, 2.0), 0.05).unwrap();
+/// let v = m.closure(b).unwrap().vertices[0];
+/// assert_eq!(m.vertex(v).unwrap().tolerance(), 0.05);
+/// ```
+pub fn cuboid_loose_vertices(
+    m: &mut Model,
+    min: Point3,
+    max: Point3,
+    vertex_tolerance: f64,
+) -> Result<Body, SampleError> {
+    let vertex_tolerance = positive("vertex tolerance", vertex_tolerance)?;
+    cuboid_with(m, min, max, Flavour::Analytic, Some(vertex_tolerance))
 }
 
 /// [`cuboid`] with the same topology, pcurves and tolerances, but its
@@ -136,14 +163,19 @@ pub fn cuboid(m: &mut Model, min: Point3, max: Point3) -> Result<Body, SampleErr
 /// assert_eq!(text.matches("nurbs degree").count(), 2, "one curve, one surface");
 /// ```
 pub fn cuboid_nurbs(m: &mut Model, min: Point3, max: Point3) -> Result<Body, SampleError> {
-    cuboid_with(m, min, max, Flavour::NurbsProbe)
+    cuboid_with(m, min, max, Flavour::NurbsProbe, None)
 }
+
+/// How far a loose vertex is lifted off its corner, per axis, in its
+/// tolerance: the diagonal is then 0.95 of it, inside the ball.
+const LOOSE_LIFT: f64 = 0.55;
 
 fn cuboid_with(
     m: &mut Model,
     min: Point3,
     max: Point3,
     flavour: Flavour,
+    vertex_tolerance: Option<f64>,
 ) -> Result<Body, SampleError> {
     let dx = positive("x extent", max.x - min.x)?;
     let dy = positive("y extent", max.y - min.y)?;
@@ -242,7 +274,15 @@ fn cuboid_with(
     }
 
     let vertices: Vec<_> = (0..8)
-        .map(|i| m.raw().add_vertex(Vertex::new(corner(i), tol)))
+        .map(|i| {
+            // A loose vertex sits off its corner, outward along the
+            // diagonal, as far as its tolerance admits of its edges' ends.
+            let lift = vertex_tolerance.map_or(0.0, |t| LOOSE_LIFT * t);
+            let side = |bit: usize| if i & bit == 0 { -lift } else { lift };
+            let at = corner(i) + Vec3::new(side(1), side(2), side(4));
+            m.raw()
+                .add_vertex(Vertex::new(at, vertex_tolerance.unwrap_or(tol)))
+        })
         .collect();
     let mut edges = Vec::with_capacity(12);
     for (&(a, b), curve) in ends.iter().zip(curves) {
@@ -327,12 +367,37 @@ fn cuboid_with(
 /// assert_eq!(m.vertices(b).unwrap().len(), 2);
 /// ```
 pub fn cylinder(m: &mut Model, radius: f64, height: f64) -> Result<Body, SampleError> {
+    cylinder_in(m, Frame::world(), radius, height)
+}
+
+/// [`cylinder`] placed by `base`: the base circle in its plane, the axis
+/// along its `Z` and the seam where its `X` points — a cylinder tangent to
+/// another, with its seam vertices on the line of contact or off it, as
+/// the checker's lump tests pose them. Errors as [`cylinder`].
+///
+/// ```
+/// use arris_debug::sample;
+/// use arris_math::{Frame, Point3, Vec3};
+/// use arris_topo::Model;
+///
+/// let mut m = Model::default();
+/// let frame = Frame::new(Point3::new(2.0, 0.0, 0.0), Vec3::z(), Vec3::x()).unwrap();
+/// let b = sample::cylinder_in(&mut m, frame, 1.0, 3.0).unwrap();
+/// assert_eq!(m.faces(b).unwrap().len(), 3);
+/// ```
+pub fn cylinder_in(
+    m: &mut Model,
+    base: Frame,
+    radius: f64,
+    height: f64,
+) -> Result<Body, SampleError> {
     let radius = positive("radius", radius)?;
     let height = positive("height", height)?;
     let tol = m.precision().default_tolerance;
-    let base = Frame::world();
-    let top = base.with_origin(Point3::new(0.0, 0.0, height));
-    let axis = Vec3::z_axis();
+    let axis = base.z();
+    let top = base.with_origin(base.origin() + axis.into_inner() * height);
+    let seam_start = base.origin() + base.x().into_inner() * radius;
+    let seam_end = seam_start + axis.into_inner() * height;
 
     let wall = m.add_surface(Surface::Cylinder {
         frame: base,
@@ -346,17 +411,13 @@ pub fn cylinder(m: &mut Model, radius: f64, height: f64) -> Result<Body, SampleE
         radius,
     });
     let seam_line = m.add_curve(Curve::Line {
-        origin: Point3::new(radius, 0.0, 0.0),
+        origin: seam_start,
         direction: axis,
     });
     let top_circle = m.add_curve(Curve::Circle { frame: top, radius });
 
-    let v0 = m
-        .raw()
-        .add_vertex(Vertex::new(Point3::new(radius, 0.0, 0.0), tol));
-    let v1 = m
-        .raw()
-        .add_vertex(Vertex::new(Point3::new(radius, 0.0, height), tol));
+    let v0 = m.raw().add_vertex(Vertex::new(seam_start, tol));
+    let v1 = m.raw().add_vertex(Vertex::new(seam_end, tol));
 
     let turn = Interval::TURN;
     let rise = Interval::new(0.0, height).map_err(|_| SampleError::Extent {

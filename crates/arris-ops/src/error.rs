@@ -147,16 +147,11 @@ pub enum InputReason {
     /// The result has no thickness: a common of flush bodies, a sweep of
     /// zero length.
     ZeroThickness,
-    /// The result's shells would touch along an edge or at a vertex — an
-    /// edge used by four faces, a vertex two lumps share, a shell touching
-    /// itself at a vertex where its faces close into more than one fan, a
-    /// full revolve's profile touching its axis at a vertex with no
-    /// segment along it — which a manifold `Solid`'s shells never do
-    /// (ADR-0006); the error's entities are the shared edges or vertices —
-    /// a section vertex named by the edges and faces whose hits and
-    /// crossings made it — none for a sweep. A body
-    /// that touches itself so is a `General` one, which no operation builds
-    /// yet.
+    /// A result shell or lump would touch itself at a shared edge or
+    /// vertex (ADR-0090), or an edge contact has ambiguous radial order.
+    /// Also raised when a full revolve's profile touches the axis at a
+    /// vertex with no segment along it. The error names the contact's
+    /// source entities. For a revolve it names no entities.
     NonManifold,
     /// The query needs an enclosed volume and the body is not a solid:
     /// a sheet, a wire, a general body.
@@ -186,7 +181,7 @@ impl core::fmt::Display for InputReason {
             }
             InputReason::ZeroThickness => f.write_str("the result has no thickness"),
             InputReason::NonManifold => f.write_str(
-                "the result's shells would touch along an edge or at a vertex, which a solid does not hold",
+                "a result shell or lump would touch itself, or the contact cannot be split into manifold shells",
             ),
             InputReason::NotSolid => f.write_str("the body is not a solid"),
         }
@@ -306,10 +301,13 @@ pub enum BooleanReason {
     /// A boolean selected no material: a `common` of disjoint operands,
     /// a target swallowed by its tool.
     Empty,
-    /// Two faces touch along a curve that would be interior to both
-    /// result faces — a hole wall tangent to a side face along a ruling,
-    /// a section curve tangent to a loop edge at a vertex — which a
-    /// manifold `Solid` cannot represent (ADR-0004, plan `⚠ OPEN` 1).
+    /// Two faces of *one lump* would touch along a curve interior to both
+    /// or at an isolated point away from shared topology, as with a
+    /// cavity tangent to an outer wall or a join that leaves an operand's
+    /// contact exposed. Also used when a section curve
+    /// is tangent to a loop edge at a vertex, or the surviving pieces
+    /// of a curve contact cannot be separated by lump. Contacts between
+    /// distinct lumps can build (ADR-0088, ADR-0089).
     TangentContact,
     /// A section curve passes a face's singular point — a cone's apex, a
     /// sphere's pole — without running through it, nearer than the face's
@@ -349,7 +347,7 @@ impl core::fmt::Display for BooleanReason {
         match self {
             BooleanReason::Empty => f.write_str("the result has no material"),
             BooleanReason::TangentContact => {
-                f.write_str("the faces touch along a curve interior to both result faces")
+                f.write_str("two faces of one lump of the result meet at a tangent contact")
             }
             BooleanReason::BesideSingularity => f.write_str(
                 "a section passes a face's apex or pole without running through it, nearer than the face's (u, v) resolves",
@@ -380,8 +378,10 @@ pub enum BlendReason {
     /// A blend does not fit its faces: a contact curve or an end arc
     /// leaves the face it lies on through an edge that is not one of the
     /// corner's own, or a corner edge is shorter than the trim would cut
-    /// from it (ADR-0007). The error's entities are the blended edge and
-    /// the face or edge the blend runs out of.
+    /// from it (ADR-0007); or two blends' contacts on one face cross or
+    /// swap order, as two rims blended on a face too narrow for both. The
+    /// error's entities are the blended edge and the face or edge the
+    /// blend runs out of, or both edges and the face.
     TooLarge,
     /// The blended edge's two faces meet at a tangent dihedral — the arc
     /// and the line of a slot's wall, a blend face and its neighbour — so
@@ -424,7 +424,7 @@ impl core::fmt::Display for BlendReason {
             BlendReason::RepeatedEdge => f.write_str("an edge is listed twice"),
             BlendReason::EdgeNotInBody => f.write_str("the edge is not an edge of the body"),
             BlendReason::TooLarge => f.write_str(
-                "the blend leaves its face through an edge that is not the corner's own",
+                "the blend does not fit its faces: it leaves its face through an edge that is not the corner's own, or two blends' contacts on one face cross or swap order",
             ),
             BlendReason::TangentChain => f.write_str(
                 "the edge's faces meet at a tangent dihedral, which has no corner to blend",
@@ -1048,7 +1048,7 @@ mod tests {
             (
                 Reason::Input(InputReason::NonManifold),
                 "NonManifold",
-                "the result's shells would touch along an edge or at a vertex, which a solid does not hold",
+                "a result shell or lump would touch itself, or the contact cannot be split into manifold shells",
             ),
             (
                 Reason::Input(InputReason::NotSolid),
@@ -1083,7 +1083,7 @@ mod tests {
             (
                 Reason::Boolean(BooleanReason::TangentContact),
                 "TangentContact",
-                "the faces touch along a curve interior to both result faces",
+                "two faces of one lump of the result meet at a tangent contact",
             ),
             (
                 Reason::Boolean(BooleanReason::BesideSingularity),
@@ -1118,7 +1118,7 @@ mod tests {
             (
                 Reason::Blend(BlendReason::TooLarge),
                 "BlendTooLarge",
-                "the blend leaves its face through an edge that is not the corner's own",
+                "the blend does not fit its faces: it leaves its face through an edge that is not the corner's own, or two blends' contacts on one face cross or swap order",
             ),
             (
                 Reason::Blend(BlendReason::TangentChain),

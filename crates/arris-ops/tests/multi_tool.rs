@@ -541,8 +541,9 @@ fn a_section_two_tools_share_is_generated_from_all_three_faces() {
 fn tools_touching_inside_the_target_are_a_tangent_contact() {
     // Two blind bores whose walls touch along a ruling that runs up out
     // of the plate's top: inside the plate both walls survive, above it
-    // neither, and the contact is read along its length, not at its
-    // midpoint, which lies on the top.
+    // neither. The midpoint lies on the top, so the contact is read
+    // along its length. The surviving walls would touch within the same
+    // lump of the cut plate (ADR-0088).
     let mut m = Model::default();
     let (plate, _) = plate_and_holes(&mut m, 0);
     let bores: Vec<Body> = [40.0, 50.0]
@@ -558,9 +559,8 @@ fn tools_touching_inside_the_target_are_a_tangent_contact() {
 
 #[test]
 fn tools_touching_along_a_seam_are_refused_as_tangent_contact() {
-    // The touch is the first hole's seam: a contact as one off the seam
-    // is, both walls surviving along it, the slit refused as the bores
-    // above are.
+    // The first hole's seam lies along the touch. Both walls would
+    // survive in the same lump of the cut plate (ADR-0088).
     let mut m = Model::default();
     let (plate, _) = plate_and_holes(&mut m, 0);
     let holes: Vec<Body> = [40.0, 50.0]
@@ -643,4 +643,42 @@ fn a_piece_flush_with_two_tools_stands_for_both() {
     let (first, second) = (under(bottom(tools[0])), under(bottom(tools[1])));
     let both: Vec<_> = first.iter().filter(|s| second.contains(s)).collect();
     assert_eq!(both.len(), 1, "{p}");
+}
+
+#[test]
+fn a_bore_over_a_bore_of_its_width_cuts_as_its_fused_tool() {
+    // A through hole of radius 1/2, then a bore of its width and a
+    // counterbore whose tops lie inside the part at z = 0: the counterbore's
+    // top crosses the hole wall along the bore's rim, a third operand's edge
+    // imaged on both. Two tools in one call and the two fused into one tool
+    // leave the same annular chamber round the hole.
+    let mut m = Model::default();
+    let (block, _) = primitive_box(
+        &mut m,
+        Point3::new(-5.0, -4.0, -2.0),
+        Point3::new(5.0, 4.0, 2.0),
+    )
+    .unwrap();
+    let hole = primitive_cylinder(&mut m, Axis::z_at(Point3::new(0.0, 0.0, -3.0)), 0.5, 6.0)
+        .unwrap()
+        .0;
+    let (drilled, _) = cut(&mut m, block, hole).unwrap();
+    let tools = |m: &mut Model| {
+        let bore = primitive_cylinder(m, Axis::z_at(Point3::new(0.0, 0.0, -3.0)), 0.5, 3.0)
+            .unwrap()
+            .0;
+        let counterbore = primitive_cylinder(m, Axis::z_at(Point3::new(0.0, 0.0, -0.5)), 1.0, 0.5)
+            .unwrap()
+            .0;
+        [bore, counterbore]
+    };
+    let two = tools(&mut m);
+    let (many, _) = cut_many(&mut m, drilled, &two).unwrap();
+    let [bore, counterbore] = tools(&mut m);
+    let (fused, _) = fuse(&mut m, bore, counterbore).unwrap();
+    let (once, _) = cut(&mut m, drilled, fused).unwrap();
+    assert_same_solid(&m, many, once, "two tools against the fused tool");
+    let volume = mass_properties(&m, many).unwrap().volume;
+    let closed = 320.0 - core::f64::consts::PI * (0.25 * 4.0 + 0.75 * 0.5);
+    assert!((volume - closed).abs() <= 1e-9 * closed, "{volume}");
 }

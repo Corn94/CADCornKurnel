@@ -21,7 +21,7 @@ re-exports the public API. Lower crates never name types from upper ones.
 | `arris-geom` | `Surface`, `Curve`, `Curve2` (analytic + NURBS): evaluation, derivatives, point projection, curve/curve, curve/surface and surface/surface intersection (`trace_quadrics`, the exact section of two quadrics by the rulings of one, and `trace_torus`, the exact section of a torus in its own parameter plane, its walk over a NURBS surface's Bézier patches against an analytic surface, and the marched section of two NURBS surfaces between seeds certified by Bernstein isolation, with the NURBS curve arms beside it — all fitted by the intersector), bounding boxes over a parameter range, the critical feet and pairs of the distance (`Curve::feet`, `Surface::feet`, `extrema_curve_curve`, `extrema_curve_surface`, `extrema_surface_surface`), pcurves and the NURBS fit behind them; the (u, v) toolkit `region2` and `integrate` shared by the checker, tessellation, mass properties and classification; `Profile`, the planar sketch of lines, arcs and elliptic arcs a sweep takes, validated and oriented by `Profile::edges`; `Path`, `FrameLaw` and `FrameField`, the G1 chain a sweep follows and the frames along it; `LoopNurbs`, `match_sections` and `interpolate_skin`, the loft sections matched into one knot vector and the surface through them; `GeomError` | `arris-math`, `thiserror`, `serde` (feature) | 0 — representation |
 | `arris-topo` | `Model` (the arena), typed ids, `Shape`/`Body`/`Face`/… handles, orientation, entities, pcurves, per-entity tolerances, Euler operators including the assembly seam (`Assembly::of_body`, `effective_uses`, `AssemblySlots`), the Euler line (`euler::EulerLine`), adjacency and iteration, `Provenance` and its audit | `arris-geom`, `arris-math`, `thiserror`, `serde` (feature) | 0 — representation |
 | `arris-check` | The invariant checker: `check(&Model, Body, Level) -> Report` and the `Violation` list of data-model §Invariants; the shared face domain (`domain::FaceDomain`), point classifier (`classify::Classifier`, `classify_point`), face-box hierarchy (`tree::FaceTree`: `near`, `nearest`) and region flux (`flux::face_flux`) every `Full` row, the boolean and tessellation read a face through | `arris-math`, `arris-geom`, `arris-topo`, `serde` (feature, forwarded to `arris-topo`) | 1 |
-| `arris-ops` | Primitives, extrude and revolve of a `Profile`, `planar_face` (a `Profile` as a one-face sheet), transform, mirror, booleans, the blends, each returning `Provenance`; the queries `measure` (mass and surface properties) and `query` (projection onto a plane, a face's outward frame, `ray_fire`, `distance`, `interference`, `interference_many`), `section` (a solid's planar section as a sheet) | `arris-math`, `arris-geom`, `arris-topo`, `arris-check`, `thiserror`, `rayon` (feature) | 2 — algorithms |
+| `arris-ops` | Primitives, extrude and revolve of a `Profile`, `planar_face` (a `Profile` as a one-face sheet), transform, mirror, booleans, the blends, each returning `Provenance`; the queries `measure` (mass and surface properties) and `query` (projection onto a plane, a face's outward frame, `ray_fire`, `distance`, `interference`, `interference_many`, `classify_points`), `section` (a solid's planar section as a sheet) | `arris-math`, `arris-geom`, `arris-topo`, `arris-check`, `thiserror`, `rayon` (feature) | 2 — algorithms |
 | `arris-mesh` | `TriMesh`, `Polyline`, the constrained Delaunay triangulation in (u, v) (`cdt`, ADR-0003), tessellation of faces and edges with shared edge discretisation; re-exports `arris-math`'s `Aabb` and `Interval`, which its signatures use | `arris-math`, `arris-geom`, `arris-topo`, `arris-check`, `thiserror`, `rayon` (feature) | 2 — algorithms |
 | `arris-io` | STEP AP214 Part 21 writer and reader (`step::write`, `step::read`, ADR-0025) over the Part 21 parser (`step::part21`), the native format (`native`), body bytes (`body`, ADR-0029), STL and OBJ mesh writers (`stl`, `obj`, ADR-0013) | `arris-math`, `arris-geom`, `arris-topo`, `arris-check`, `arris-mesh`, `thiserror`, `serde`, `serde_json`, `postcard` (the last three behind the `serde` feature) | 2 — algorithms |
 | `arris-debug` | Text dump, the hand-built sample bodies (`sample`), PNG render (own software rasteriser over `image`), Rerun stream (feature), the fixture loader and corpus lint, the corpus runner (`corpus`), the part fixtures' runner and lint (`part`), the battery run on every part's solid (`battery`), the refusal histogram and ADR-0026's table (`histogram`), a fetched part surveyed (`survey`), a STEP file seen solid by solid (`step_file`) and the oracle seam (`oracle`), the fillet column by part (`census`), the script-corpus refusal histogram (the `script_corpus` example), the seeded property-test runner and strategies (`prop`, `prop::recipe` among them), the differential over both kernels (`differential`), the benchmark timer (`bench`) | `arris-ops`, `arris-mesh`, `arris-io`, `arris-topo`, `arris-geom`, `arris-math`, `image`, `serde`, `serde_json`, `sha2`, `thiserror`, `proptest` (not on `wasm32`), `rerun` (feature) | 3 — dev-facing |
@@ -371,6 +371,19 @@ Result<Vec<Clash>, OpError>` tests the body boxes pair by pair and returns a
 `Clash` (`operands`, `verdict`) for every pair that is not apart, in
 ascending pair order, the control polled per pair.
 
+`ops::query::classify_points(&Model, Body, &[Point3], &Control) ->
+Result<Vec<Option<Classification>>, OpError>` classifies a batch of points
+against a solid with one `Classifier`, in order on one thread, so the answers
+do not depend on the thread count. Each is what `classify_point` gives; `None`
+is a point no ray decided, never a failure of the batch. A non-finite point
+fails the call before any is classified, a body that is not a solid is refused
+as `NotSolid`, and the meter ticks once per point. The classifier's `on` pass
+tries only the faces whose boxes hold the point (`FaceTree::near`, in `FaceId`
+order, so the first match is the same as `classify_linear`'s); a face's box
+holds its edges and surface and its vertices, each grown by its tolerance.
+The binding returns one byte per point (`0` outside, `1` inside, `2` on,
+`3` undecided), and the corpus's probe stage runs through the same batch.
+
 `ops::boolean::interferences(&Model, a, b) -> Result<Interferences,
 OpError>` is another query: the boolean decomposition of ADR-0004 as
 a value, computed without building anything. It is the two-operand case
@@ -405,15 +418,22 @@ intersected in one region for the whole boolean — the overlap of the
 operands' boxes grown by its own diagonal — so pairs on the same two
 surfaces get the same traced curve (ADR-0018). It holds every face
 pair whose boxes overlap with its `SurfaceIntersection` — its crossing
-curves the *section curves*, its touching curves the *contact curves*,
-one pair holding either or both; its points matter only as a traced
-section's singular points, where its branches end, or as an apex or a
-pole an operand's own vertex already stands on; every point where
-an edge of one operand pierces a face of the other, kept when the
+curves the *section curves* and its touching curves the *contact curves*.
+Crossing points mark where traced branches end. Isolated touches stay
+in the pair as evidence for selection and for testing surviving regions
+(ADR-0089). An apex or pole can already be an operand vertex. The pave
+model also holds every point where an edge of one operand pierces a face of the other, kept when the
 parameter is in the edge's range and the (u, v) is on the face
 (`region2::point_side` on the face's loops, a `Boundary` verdict
 resolved to the edge or vertex of the face within its own tolerance,
-the edge's own end vertex when the hit is within its ball); those hits
+the edge's own end vertex when the hit is within its ball; an edge that
+lies in the face, which pierces it nowhere, is hit at an end vertex on
+the face that no other hit there names, where a section curve of the face
+and a face holding the vertex runs through it and no edge of that face
+ending there runs along the curve — the outer seam's ends of a cap whose
+rim a wall inside touches a hair off the seam, the seam within the
+tolerance of that wall and the rim only touching it, so the section
+circle is paved there); those hits
 merged into section vertices by *closure*, not by arrival — every
 candidate point (the hits, the edge–edge crossings, the section
 crossings and singular vertices below, the operand vertices they name)
@@ -465,7 +485,15 @@ crossing twice at a shallow angle, a small circle through a sphere's
 pole 2e-4 of a radian off the seam and back across it 1.8e-4 on, within
 9e-9 of it between — their common points are taken along the line
 their two planes meet in (`conic_crossings`), a quadratic whose double
-root is decided by its own rounding and never by a tolerance;
+root is decided by its own rounding and never by a tolerance. Where the
+edge truly touches a section curve — a section circle tangent inside a
+cap's rim, where a cylinder stands inside a wider one and touches its
+wall — the touch is a vertex of both when the curve runs inside both
+faces on either side of it, decided by stepping along the curve from
+the touch, at distances growing fourfold from the tolerance, to the
+first point the faces' polygons put off their boundary; the crescent
+the cap keeps is then one loop through that vertex twice. A touch where
+the curve runs outside a face splits nothing;
 an operand face's *singular vertex* — a cone's apex, a sphere's pole,
 held by a degenerate edge that has no curve and is hit by nothing — that a
 section curve of one of the face's pairs runs through, within
@@ -476,7 +504,11 @@ only touches it, so no block has the point inside it; a section that
 passes beside the point, nearer than the face's (u, v) polygons resolve,
 is refused by name (`BooleanReason::BesideSingularity`, ADR-0021);
 the paves each vertex puts on the edge that hit or touched it — none
-where the vertex holds one of that edge's own ends — and on
+where the vertex holds one of that edge's own ends — and on the face's
+edge a hit landed on, at the hit's projection, which that edge's own
+hits do not pave where it only touches the other operand's face (a cap's
+rim tangent inside a wall whose seam crosses the cap beside the touch);
+on
 every section curve it projects onto within its tolerance — at the
 parameter of its own section crossing on a curve that crossing names,
 so two section curves end on the point where they cross whatever the
@@ -484,7 +516,13 @@ vertex's point is; an open
 section curve at each of its ends a vertex lies on, both ends of a
 traced branch that leaves a singular point and comes back to it; and the
 section edges — the blocks between consecutive paves whose midpoint is
-inside both faces, a closed curve with no pave seeded at the start of
+inside both faces, or, where one face's polygons put the midpoint on its
+boundary, whose end off that boundary is inside it and past which the
+curve goes on inside it, since a block crosses no boundary between its
+paves (a section circle tangent inside a rim hugs it from the touch to
+the other operand's seam) — a block on both faces' boundaries, or one
+whose curve never leaves the band there, would cut only a sliver and is
+dropped — a closed curve with no pave seeded at the start of
 its domain when it is interior to both, and a periodic one's last block
 wrapping round to its first pave, one period on — a traced loop's
 period being its own length, not a turn — each with a pcurve on each
@@ -517,8 +555,16 @@ edge from the crossing to it: two edges on one surface crossing at a
 shallow angle stay that near over a stretch longer than the tolerance,
 the intersector's point may lie anywhere along it, and where an earlier
 operation made the vertex at that crossing it is that vertex, not a
-second one a hair past its tolerance; every edge of either face is paved by
-every section vertex on it but its own ends — a vertex holding one of
+second one a hair past its tolerance. Two edges that touch there
+without crossing are a section vertex too where either runs inside the
+other face beside the touch, decided as a section curve's touch of a
+rim is — a boss's rim tangent inside a bar's end edge, the bar's face
+pinched to that point between them; a touch from outside both faces
+splits nothing, unless the two faces lie on opposite sides of their
+plane (a frustum's cap and the box standing on it), where the solids
+touch at that point. The contact paves both boundaries, and a fuse
+keeps a vertex at the contact in each lump. Every edge of either face
+is paved by every section vertex on it but its own ends — a vertex holding one of
 the edge's end vertices, a crossing merged into it even a hair past
 that end's tolerance, paves nothing there, which would leave a sliver
 block; and each piece of each edge between its
@@ -578,11 +624,14 @@ radius, along a circle — contributes no section edge and no pave on any
 operand edge: it is paved by the *touches*, the hits of either face's
 edges on the other face that lie on it (every curve in a face tangent to
 the other surface is tangent to it there, so these are where the curve
-leaves one face inside the other), and each block between consecutive
-touches whose midpoint is inside both faces — on a seam of either
-counting as inside, the face lying on both sides of it — is a *contact*,
-the segment the two faces share, and a piece whose interior point lands
-on that seam is decided by the curvature rule as one on the contact is; on a closed curve the last block wraps round to the
+leaves one face inside the other). Where two coincident caps' rims touch
+from outside at a contact's end, a rim hit on the opposite wall and a
+seam hit on the opposite cap make no section vertex (ADR-0088). Each
+block between consecutive touches whose midpoint is inside both faces is a
+*contact*. The midpoint counts as inside a face when it lies on a seam of
+that face, since the face lies on both sides of it. The curvature rule
+decides a piece whose interior point lands on a seam the same way as one
+on a contact. On a closed curve the last block wraps round to the
 first touch, and a closed curve no edge reaches is one block
 (`boolean/ball-in-bore-cut`, refused as `BooleanReason::TangentContact`). Every list is in a deterministic order and `Display` prints the
 whole model, which is what the `inspect` skill reads when a boolean is
@@ -600,11 +649,24 @@ apart between the two tangent distances, some with a seam on a ruling or
 flush caps — and `crossing_pair` — equal radii crossing at 30° to 90°,
 each through the other, some with a seam through a crossing vertex, its
 `common` held to `16R³/(3 sin ψ)` and either `cut` to
-`InputReason::NonManifold`. `bar_cut` is the split-order property's operand
-(ADR-0009): a box cut by one or two slabs that cross it, drawn together
+`V(target) − V(common)` and two touching lumps. `bar_cut` is the split-order
+property's operand (ADR-0009): a box cut by one or two slabs that cross it, drawn together
 with a second set of slabs and a resized, re-posed box, so the same
 recipe is built twice under a parameter edit that never changes which
-entities bound which piece.
+entities bound which piece. `standing` draws three to five boxes and
+cylinders on one plane, half on whole numbers so bases, tops and walls
+come out flush, a wall tangent to another among them: `fuse_many` is held to
+the chain of `fuse`s on it (a chain refused `TangentContact` at a step a
+later solid covers is allowed), and a box split by a plane and fused back to
+`interference` with the whole (`coplanar_prop`, both `#[ignore]`d until the
+fixtures they found pass).
+
+`prop::tangent` draws three families whose walls touch along a line, each
+in a random pose with a closed form for every boolean: a cylinder tangent
+inside a larger one, a bar with a boss tangent to each end, and a column
+tangent to a bore along four lines (`tangency_prop`). Each boolean builds
+`Full`-green to the closed form or is refused by a modelled reason, never
+`Internal`.
 
 `ops::split(m, body, plane: &Frame, control)` cuts a solid by a plane and
 keeps both sides (ADR-0051): `Split { positive, negative, provenance }`,
@@ -675,22 +737,34 @@ already made on a face both hold — two tools' walls cutting one face along
 one curve — the block is that edge (`SectionEdge::shared`), given its
 pcurve on the later pair's other face, and generated from all three faces;
 an image of a tool's edge piece that is a common block of another tool's
-piece imaged on the same face is held once, as that piece. A contact
+piece imaged on the same face is held once, as that piece. An image is
+placed on a face once, whichever pair of faces meets it (two coplanar faces
+of one operand share an edge inside one face of the other), and a section
+block along an edge already imaged there, of any operand, is that edge. A contact
 between two tools is read against every other operand along its length,
 so two tools touching inside a cut's target are `TangentContact`. Every
 face of both operands is split in its own (u, v): the pieces of its
 loops between consecutive paves and the section edges on it make a
-planar arrangement — half-edges ordered around each node by the pcurves'
-tangent angle, a tie within the angular tolerance by the signed
-curvature, a tie of both `BooleanReason::TangentContact` — whose regions are
-walked by taking the next half-edge clockwise from the direction one
+planar arrangement — half-edges ordered around each node by their
+tangent angle in (u, v), a tie within the angular tolerance by the signed
+curvature, a tie of both `BooleanReason::TangentContact` — unless the two
+are section edges or images running between the same two nodes along one
+curve, which is one section or image entered twice and the invariant fault (`Fault::Invariant`),
+never the contact — whose regions are walked by taking the next half-edge clockwise from the direction one
 arrived from; a cycle turning once counter-clockwise bounds a piece, one
 turning clockwise is a hole, assigned by winding to the innermost piece
 around it. A cusp, where the walk leaves back the way it arrived within
 the angular tolerance, as a blend leaving a line tangent to it does, turns
 by ±π as the node's order decided it by curvature: `+π` round a spike when
 the leaving curve bends right of the arriving one walked back, never by
-rounding. Each piece is classified at `region2::interior_point`
+rounding. The tangent and the curvature at a node are the edge's 3D
+curve's, carried into (u, v) through the surface's first and second
+derivatives there, and the pcurve's own where the surface is singular or
+the 3D curve is a NURBS, fitted itself: a fitted pcurve is held to its curve in position, not in
+direction, and a section ellipse fitted on a cylinder leaves the point
+where it touches the face's rim about 1e-7 rad off the rim's direction,
+which the angular tolerance reads as a crossing
+(`boolean/fuse-end-disc-tangent-to-wall`). Each piece is classified at `region2::interior_point`
 carried to 3D by `classify_point` against the other operand, and the
 table decides. A ray crosses a NURBS face as it crosses an analytic one
 (data-model §Curves, a line against a `Nurbs` surface); were a piece's
@@ -711,12 +785,16 @@ normals at the piece's interior point agree or oppose, and the piece is
 kept from A alone, in A's orientation, `Modified` from A's face and
 `Generated` from B's, or dropped by both. The images of B's edges split
 A's face along B's boundary and B's images split A's, so the piece is
-exactly the overlap; a common block is one edge of the result, A's
-piece, and every use of B's piece is rewritten to it with a pcurve
-fitted to A's curve in that use's translate of the domain (a seam's two
-uses get two), B's piece `Modified` into A's. A piece classified `On` a
+exactly the overlap. A common block uses the representative edge piece,
+A's, and every use of B's piece is rewritten to it with a pcurve fitted
+to A's curve in that use's translate of the domain (a seam's two uses
+get two). In an n-ary fuse, two operands may both match an edge piece
+on a third operand. Provenance maps each source to the representative's
+result edges, including any copies at a contact. A piece classified `On` a
 face its own face is tangent to has its interior point on the ruling
-and lies to one side of the other operand everywhere else; which side is
+and lies to one side of the other operand everywhere else, as does one
+classified `On` a seam of that face or a vertex of it on the contact
+curve, where the contact ends at a rim; which side is
 the *curvature rule*. With `n` the other face's effective outward normal
 at the contact, each surface leaves the shared tangent plane across the
 contact curve as `κ s² / 2` along `n`, `κ` its normal curvature across
@@ -732,17 +810,31 @@ are `−1/R₁` against `+1/R₂` outside and two distinct radii inside, never
 equal, since equal radii touching inside share their axis and are
 `Coincident`. Equal curvatures, compared exactly, are a touch of higher
 order the rule cannot decide, `OpError::Unsupported` naming the pair.
-Before any face is
-split, every contact is decided at its midpoint by the same rule and the
-table: a contact whose two pieces would both survive is two result faces
-touching along a curve interior to both, and the operation is
-`Degenerate` with `BooleanReason::TangentContact` naming the pair — a hole wall
-tangent to a side face, or a `fuse` of two solids that touch along a
-line — because the manifold `Solid` cannot carry the slit (ADR-0004). A
-touch from outside in a `cut` or a `common` passes: the tool's piece is
-dropped, the target's kept whole, and the ruling is no edge — Open
-CASCADE imprints it, and `boolean/tangent-outside-cut` states that
-convention. A piece `On` an edge or a vertex, or on a face its own is
+Before any face is split, the same rule and the table decide each contact
+between operands at the midpoint of each span. Intersections with a third
+operand's faces subdivide the contact before this test. A contact whose
+two pieces would both survive is a slit: two result faces touching along
+a curve interior to both. Once the kept pieces are
+grouped into shells and the shells into lumps, the slit is looked up by the
+lumps of the pair's two faces' kept pieces: in two different lumps, the
+lumps touch and the result is built — a `fuse` of two solids that touch
+along a line is one `Solid` of two touching lumps, each with its own edges
+and vertices (ADR-0088); in one lump, or when a face has pieces in a lump
+the other's are in, the operation is `Degenerate` with
+`BooleanReason::TangentContact` naming the pair — a hole wall tangent to a
+side face, a ball in a bore of its radius, whose cavity touches the wall
+round it — because the lump's material would touch itself, which no manifold
+`Solid` carries (ADR-0004). If two shells from one operand contribute faces
+to the same result lump, the checker tests those output trims for
+inherited touches. It subdivides a contact curve at its intersections with
+the face trims. For an isolated point, it checks both trims, including any
+seam or pole at the contact. A touch away from shared topology returns the
+same refusal naming the two operand faces. A joining piece that covers
+the contact can fuse the shells. When the operands touch only at a point
+or along a ruling, a `cut` keeps the target whole and a `common` returns
+`Empty`. Open CASCADE can imprint that contact on the target, as the
+`boolean/tangent-outside-cut` and hinge cut fixtures record. A piece
+`On` an edge or a vertex, or on a face its own is
 neither coincident nor tangent with, lies within the tolerance of the
 other operand at its interior point — a sliver between a seam and two
 section curves beside the point where they cross is within it
@@ -754,27 +846,57 @@ direction is against the other face's effective outward normal. The
 piece crosses no face of the other operand inside itself, so every such
 edge decides the same, and the one read is the one whose two surfaces
 are furthest from tangent; nothing in it measures a distance, so no
-tolerance decides it. A piece with no section edge of a crossing
-pair, or whose surfaces are tangent within the angular tolerance along
-every one, is `OpError::Unsupported` naming the pair. The survivors are
+tolerance decides it. When the reported entity belongs to a face with
+an isolated touch and these rules leave the side open, selection tries
+other points on the same trimmed piece against that operand. Candidates
+stay on the original surface in the piece's seam translate and clear its
+loops at the classifier's parameter band plus their chord deviation.
+The first clear verdict enters the ordinary selection table. A sample
+that remains undecided after the bounded retry returns the named
+`OpError::Unsupported` (ADR-0089). The survivors are
 grouped into shells by shared edges — none is
 `Degenerate` with `BooleanReason::Empty`, or with `InputReason::ZeroThickness` when
 what was dropped lay on the other operand (two solids sharing only a
-face); an edge piece used by more than two faces, or a vertex two shells
-reach, is two lumps touching and `InputReason::NonManifold` naming it, and so
-is a vertex whose face uses close into more than one fan — the corners
-there, a use arriving and the next leaving, joined where two share an
-edge piece — one shell touching itself at a point, as a wall is left
-pinched at a singular point of a section; both before anything is
-assembled — and several shells are ordered into lumps, each outer shell then
-the voids inside it (ADR-0006), by assembling them once into a clone of
-the model and reading `arris_check::lumps` of that body, so the order is
-B1's own; a split target, a disjoint `fuse` and a cavity are each one
-solid. The shells are then assembled through
-`Builder::assemble` with every untouched entity of a kept-by-id operand
-`Keep`: a face whose loops changed at all, even only by a split edge or
-a re-tolerated vertex, is a new face `Modified` from the old; the tool
-of a `cut` keeps nothing, every entity of it `Deleted` and each
+face). At an edge piece with more than two uses, the face normal crossed
+with the oriented edge tangent gives the direction into each piece at
+the edge's midpoint. In cyclic order about the forward tangent, a
+reversed use enters material and the next forward use leaves it. Shell
+grouping connects the pairs across material. Ties within the model's
+angular tolerance and consecutive uses with the same orientation return
+`InputReason::NonManifold` naming the edge (ADR-0090). Each shell gets
+its own copy of a shared edge piece and its endpoints, or of a shared
+vertex at a point contact. The first shell can keep existing ids.
+Provenance records every copy from each source.
+An edge still used more than twice in a shell returns `NonManifold`.
+The same refusal names a vertex where the corners of a shell form more
+than one fan, as when a wall is pinched at a singular point of a section.
+Several shells are ordered into lumps, each outer shell then its voids
+(ADR-0006). The boolean assembles them once into a clone of the model and
+reads `arris_check::lumps` of that body, using B1's order. Shells in the
+same lump that still reach a shared edge or vertex return `NonManifold`.
+When pieces of two operand shells contribute to one result lump, the
+rebuilt boundaries decide whether separate copies of the operand contact
+survive. A bridge that covers the contact joins the lumps. An exposed
+contact returns `NonManifold` naming the source edges or vertices.
+The boolean also checks each shell for new pairs of coincident vertices
+under V4. An unchanged pair inherited from one operand shell can survive.
+A new pair returns `NonManifold` naming its source entities (ADR-0090).
+A split target, a disjoint `fuse` and a cavity are each one solid. Two
+pieces in one lump whose output trims retain an isolated
+touch away from shared topology return `BooleanReason::TangentContact`
+naming the source faces. Two lumps that retain an isolated touch can
+build with their own edges and vertices (ADR-0089). For a ring torus
+touching the centre of a box face, the tracer gives a `MeetPoint` in
+all three poses in `boolean/torus-box-point-fuse`. At the torus's seam
+vertex the two tangent edge hits meet at that existing vertex alone.
+Along the equator seam away from the vertex, the one tangent hit adds
+no pave. Off both seams the face pair supplies the point without an
+edge hit. The three poses preserve both operands' face trims. The shells are
+assembled through `Builder::assemble` with every untouched entity of a kept-by-id operand
+`Keep` (for an operand copied because it shares entities, the copy's, so
+not the caller's ids: below): a face whose loops changed at all, even
+only by a split edge or a re-tolerated vertex, is a new face `Modified`
+from the old; the tool of a `cut` keeps nothing, every entity of it `Deleted` and each
 surviving piece `Generated` from its parent (data-model §Provenance).
 A `fuse` and a `common` have no tool: both operands are kept by id, so
 an untouched face of either keeps it, and the result's body is `Modified`
@@ -783,6 +905,21 @@ alone; a result shell is `Modified` from the operand shells its pieces
 came from, and a cavity made of a cut tool's pieces alone is `Generated`
 from the tool's shell. Tolerances follow data-model §Tolerances' growth rule and a
 piece keeps its parent's.
+
+Operands may share entities: a body split and fused back keeps the faces
+the split left untouched, by id, so it shares them, their edges and their
+vertices with the body it was split from. The pave model reads every
+entity as one operand's, so `boolean/shared.rs` replaces an operand that
+shares any vertex, edge, face or shell with an earlier operand by its copy
+(`transform`'s `copy_body` on the same geometry) inside the boolean's
+transaction, and writes the result's record and a refusal's entities back
+against the caller's ids (data-model §Provenance, ADR-0087). An untouched
+entity of the copied operand that the result keeps is therefore a new id,
+`Modified` from the caller's: the one exception to "an untouched entity
+keeps its id". Once the boolean succeeds the copy's entities the result
+does not reach are discarded (`Model::discard`). Operands that share
+nothing are read as given. `interferences` and `interferences_many` read
+every operand as given.
 
 The keep-by-id assembly and the provenance writer above are
 `arris-ops`'s own `rebuild` module (ADR-0004), not the boolean's: a
@@ -859,7 +996,11 @@ has the cylinder's `Z` and its `X` at the edge's vertex, so its `u` seam
 — a tube circle of the torus, a ruling of the cone — runs between the
 two contacts' vertices in the half-plane of the cylinder's own seam,
 which is shortened to the contact on the cylinder; that vertex must
-carry no other edge, else `VertexBlend`. A plane against a cone along a
+carry no other edge, else `VertexBlend`. Two such rims on one face
+(`blend/crowd.rs`) are read first, on the face's meridian from edge to
+contact — the radius on a plane, the height on a cylinder or a cone — and
+bands that overlap or meet, the contacts swapped or one, are `TooLarge`
+naming both edges and the face, before anything is built. A plane against a cone along a
 circle coaxial with it — a frustum's rim, a conical boss's base — is the
 same construction read in the half-plane bounded by the axis (ADR-0036):
 each face's meridian is a line there, the ball's centre is where the two
@@ -1424,8 +1565,8 @@ involved, so the message a consumer shows — or the agent reads — says
 | Variant | When | Carries |
 |---|---|---|
 | `InvalidInput` | an input body fails the checker (checked in debug builds before the operation starts, and in release when the `paranoid` feature is on) | `Body`, the `Report` |
-| `Unsupported` | the exhaustive dispatch reached a surface or curve pair the kernel has no formula for yet — a boolean's face pair of a NURBS face flush with another, a tangent contact or an `On` piece that neither the curvature rule nor the transversal rule decides, a blend's face pair outside its table or the face across a blend's end | the two `GeomKind`s with their entities |
-| `Degenerate` | the requested result has no valid representation: a parameter that makes no geometry (`InputReason::NonFinite`, `InputReason::NotPositive` naming it — a zero radius, a box whose `min` is not below its `max`, a revolve angle at or below zero, a zero extrude direction; `SweepReason::AngleAboveTurn` past `2π`), a zero-thickness intersection or an extrude of zero length (`InputReason::ZeroThickness`), a revolve whose axis is off the profile's plane (`SweepReason::AxisNotInProfilePlane`), whose profile crosses its axis (`SweepReason::ProfileCrossesAxis`) or lies within the tolerance of it everywhere (`InputReason::ZeroThickness`), or whose arc's circle crosses it (`SweepReason::SpindleTorus`), or whose profile has an elliptic segment (`SweepReason::EllipticRevolve` naming the loop and segment, ADR-0014); a sweep whose profile's plane holds the path's start tangent (`SweepReason::ProfileAlongPath`), whose profile reaches a curved span's radius of curvature (`SweepReason::SweepFolds` naming the span and the arc length, ADR-0063) or whose closed path's rotation-minimising frame comes back turned (`SweepReason::FrameDoesNotClose { angle }`); a boolean that selects no material (`BooleanReason::Empty`: a target inside its tool, a `common` of disjoint operands); a `cut_many` with no tool or a `fuse_many` of fewer than two bodies (`BooleanReason::NoTools`) and a body twice among a boolean's operands (`BooleanReason::RepeatedOperand`, naming it, ADR-0050 §8); result shells that would touch along an edge or at a vertex, a shell that would touch itself at a vertex whose faces close into more than one fan — a wall pinched at a singular point of a section — or a full revolve touching its axis at a vertex with no segment along it (`InputReason::NonManifold`, naming the shared edges or vertices, none for a sweep); faces touching along a curve interior to both result faces (`BooleanReason::TangentContact`); a section passing a face's apex or pole without running through it, nearer than the face's (u, v) polygons resolve (`BooleanReason::BesideSingularity`, naming the two faces and the vertex, ADR-0021); a blend asked for no edges (`BlendReason::NoEdges`), for an edge twice (`BlendReason::RepeatedEdge`) or for an edge of another body (`BlendReason::EdgeNotInBody`), one that leaves its face, outruns a corner edge or a seam, or around a closed edge would need a contact reaching the axis or an arc of the tube running onto it (`BlendReason::TooLarge`), one at a tangent dihedral or ending on a tangent corner edge (`BlendReason::TangentChain`), or one at a corner the closed forms do not cover (`BlendReason::VertexBlend`, ADR-0007); an offset of no faces, of a face twice or of another body's face (`OffsetReason::NoFaces`, `RepeatedFace`, `FaceNotInBody`), one that makes an edge or face vanish or turn inside out (`Vanishes`) or splits a vertex into an edge (`VertexSplits`), moves a face with no exact offset of its kind (`NoExactOffset`) or drives a surface through zero (`SurfaceCollapses`), pulls a dragged face clear of a fixed neighbour (`Gap`), or builds a body whose faces run into each other (`SelfIntersects`, found by the checker's global level), ADR-0048 §3, §6, §7; a query on a body that is not a `Solid` (`InputReason::NotSolid`); a projection handed a face, shell or body (`QueryReason::NotProjectable`), a degenerate edge (`QueryReason::DegenerateEdge`), or a curve that projects to a point or a segment (`QueryReason::ProjectionCollapses`); `face_frame` on a curved face (`QueryReason::NotPlanar`); `frame_at` at a `(u, v)` outside the face's domain (`QueryReason::OutOfDomain`) or at a singular one with no normal (`QueryReason::Singular`); a `ray_fire` with a direction of no length (`QueryReason::ZeroDirection`, naming the body) or a ray lying in a face (`QueryReason::RayInFace`, naming the face, ADR-0053 §4); a `distance` handed a shell or a body that is not a solid (`QueryReason::NotMeasurable`, naming it, ADR-0054) | the entities (none for a primitive or a sweep) and a `Reason`, grouped by the operation that raises it: `Input` (`NonFinite`, `NotPositive`, `ZeroThickness`, `NonManifold`, `NotSolid`), `Sweep`, `Boolean`, `Blend`, `Offset` and `Query`, each its own enum. `Reason::name()` is the leaf's stable name (`BlendTooLarge`), which the refusal histograms key on; `Display` is the leaf's own message |
+| `Unsupported` | the exhaustive dispatch reached a surface or curve pair the kernel has no formula for yet — a boolean's face pair of a NURBS face flush with another, a tangent contact or an `On` piece whose side the classification rules and isolated-touch retry leave undecided, a blend's face pair outside its table or the face across a blend's end | the two `GeomKind`s with their entities |
+| `Degenerate` | the requested result has no valid representation: a parameter that makes no geometry (`InputReason::NonFinite`, `InputReason::NotPositive` naming it — a zero radius, a box whose `min` is not below its `max`, a revolve angle at or below zero, a zero extrude direction; `SweepReason::AngleAboveTurn` past `2π`), a zero-thickness intersection or an extrude of zero length (`InputReason::ZeroThickness`), a revolve whose axis is off the profile's plane (`SweepReason::AxisNotInProfilePlane`), whose profile crosses its axis (`SweepReason::ProfileCrossesAxis`) or lies within the tolerance of it everywhere (`InputReason::ZeroThickness`), or whose arc's circle crosses it (`SweepReason::SpindleTorus`), or whose profile has an elliptic segment (`SweepReason::EllipticRevolve` naming the loop and segment, ADR-0014); a sweep whose profile's plane holds the path's start tangent (`SweepReason::ProfileAlongPath`), whose profile reaches a curved span's radius of curvature (`SweepReason::SweepFolds` naming the span and the arc length, ADR-0063) or whose closed path's rotation-minimising frame comes back turned (`SweepReason::FrameDoesNotClose { angle }`); a boolean that selects no material (`BooleanReason::Empty`: a target inside its tool, a `common` of disjoint operands or operands that touch only at a point); a `cut_many` with no tool or a `fuse_many` of fewer than two bodies (`BooleanReason::NoTools`) and a body twice among a boolean's operands (`BooleanReason::RepeatedOperand`, naming it, ADR-0050 §8); a shell or lump whose boundary would touch itself at a shared edge or vertex, an edge contact whose radial order is ambiguous, a shell that would touch itself at a vertex whose faces close into more than one fan — a wall pinched at a singular point of a section — or a full revolve touching its axis at a vertex with no segment along it (`InputReason::NonManifold`, naming the shared edges or vertices, none for a sweep); faces of one lump touching along an interior curve or at an isolated point away from shared topology (`BooleanReason::TangentContact`, ADR-0088 and ADR-0089); a section passing a face's apex or pole without running through it, nearer than the face's (u, v) polygons resolve (`BooleanReason::BesideSingularity`, naming the two faces and the vertex, ADR-0021); a blend asked for no edges (`BlendReason::NoEdges`), for an edge twice (`BlendReason::RepeatedEdge`) or for an edge of another body (`BlendReason::EdgeNotInBody`), one that leaves its face, outruns a corner edge or a seam, or around a closed edge would need a contact reaching the axis or an arc of the tube running onto it (`BlendReason::TooLarge`), one at a tangent dihedral or ending on a tangent corner edge (`BlendReason::TangentChain`), or one at a corner the closed forms do not cover (`BlendReason::VertexBlend`, ADR-0007); an offset of no faces, of a face twice or of another body's face (`OffsetReason::NoFaces`, `RepeatedFace`, `FaceNotInBody`), one that makes an edge or face vanish or turn inside out (`Vanishes`) or splits a vertex into an edge (`VertexSplits`), moves a face with no exact offset of its kind (`NoExactOffset`) or drives a surface through zero (`SurfaceCollapses`), pulls a dragged face clear of a fixed neighbour (`Gap`), or builds a body whose faces run into each other (`SelfIntersects`, found by the checker's global level), ADR-0048 §3, §6, §7; a query on a body that is not a `Solid` (`InputReason::NotSolid`); a projection handed a face, shell or body (`QueryReason::NotProjectable`), a degenerate edge (`QueryReason::DegenerateEdge`), or a curve that projects to a point or a segment (`QueryReason::ProjectionCollapses`); `face_frame` on a curved face (`QueryReason::NotPlanar`); `frame_at` at a `(u, v)` outside the face's domain (`QueryReason::OutOfDomain`) or at a singular one with no normal (`QueryReason::Singular`); a `ray_fire` with a direction of no length (`QueryReason::ZeroDirection`, naming the body) or a ray lying in a face (`QueryReason::RayInFace`, naming the face, ADR-0053 §4); a `distance` handed a shell or a body that is not a solid (`QueryReason::NotMeasurable`, naming it, ADR-0054) | the entities (none for a primitive or a sweep) and a `Reason`, grouped by the operation that raises it: `Input` (`NonFinite`, `NotPositive`, `ZeroThickness`, `NonManifold`, `NotSolid`), `Sweep`, `Boolean`, `Blend`, `Offset` and `Query`, each its own enum. `Reason::name()` is the leaf's stable name (`BlendTooLarge`), which the refusal histograms key on; `Display` is the leaf's own message |
 | `Profile` | a sweep's sketch is not a valid profile: `Profile::edges` refused it (data-model §Profiles). An invalid profile has no entities to name, so it is neither `InvalidInput` nor `Degenerate` | the `ProfileError`, naming the loop and segment |
 | `Loft` | a loft's sections cannot be matched or joined: too few (`TooFewSections`), unequal loop counts (`LoopCount`), an invalid profile (`Profile`), a loop no rational quadratic holds (`Loop`), two consecutive sections equal (`Coincident`), too many for a smooth loft (`TooManySections`), a segment's surface that cannot be interpolated (`Smooth`), ADR-0065 §5 | the `LoftError`, naming the section |
 | `Degenerate` (`SplitReason::NoCrossing`) | a split's plane misses the body or only touches it along a face, an edge or a vertex, so one side would be empty; the body is named | the body |
@@ -1481,7 +1622,8 @@ that constructs it and sees it reported, and a level:
 - `Level::Fast` — combinatorial and local geometric checks (ids resolve,
   loops close, orientations compose, tolerances are ordered, pcurves match
   their 3D curves at sample points, a torus face's pcurves off its axis — the regular band). Linear in the body. This is what runs
-  after every operation.
+  after every operation. Booleans separately sweep each result shell for
+  new pairs of coincident vertices (V4, ADR-0090).
 - `Level::Full` — adds the global checks: an edge does not cross itself,
   the loops of a face do not cross, faces of a shell intersect only at
   shared edges, shells nest, a solid encloses positive volume. Not
@@ -1713,7 +1855,10 @@ depends on `check`. The mesh guarantees (ADR-0003):
   indices. A seam edge is discretised once and its indices appear in the
   wall's triangles twice, once from each copy of the pcurve; a
   degenerate edge's (u, v) segment maps to one index and the triangles
-  that collapse are dropped.
+  that collapse are dropped. A vertex a face's loops pass twice at one
+  (u, v) — a crescent's pinch, or a hole meeting its outer loop — is
+  one point of the triangulation, at the (u, v) the face first gave it
+  (ADR-0003, amendment).
 - Triangles are counter-clockwise seen from outside, by the face use's
   effective orientation against the surface normal.
 - Same body, same chord, same mesh on every platform, with the
@@ -1728,8 +1873,10 @@ depends on `check`. The mesh guarantees (ADR-0003):
   become one index run, compared bit for bit, never snapped; a difference
   is `MeshError::WeldMismatch` naming the edge. A partition of a body's
   faces, meshed apart and welded in any order, is the one-call mesh's edge
-  polylines and per-face triangles, and closed. The corpus runner holds
-  every fixture to it.
+  polylines and per-face triangles, and closed for a solid. Contact copies
+  in touching lumps have distinct edge ids, so welding retains separate
+  indices for the coincident positions and each lump stays closed
+  (ADR-0090). The corpus runner holds every fixture to the one-call mesh.
 - A face whose surface curves in both directions — a sphere, a torus, a
   NURBS surface — carries interior points on a uniform (u, v) lattice at
   its `chord_steps` spacing, those its loops wind around; a ruled
@@ -2086,8 +2233,13 @@ B-Rep).
   queued run is covered by the next one over its range (ADR-0085).
   `/retire-plan` runs the full profile at 256 cases and records the
   verdict (`tools/gate-reuse.sh`), which `/close-cycle` and `/release`
-  reuse while no code path differs; CI runs 1000. `tools/stop-gate.sh` stops a
-  stuck hook or test run in this checkout, and only in it.
+  reuse while no code path differs. Full CI runs 1000 cases. A pull
+  request runs the cheap jobs and `pr-fast`, which uses the base
+  revision's `tools/pr-check.sh` on the PR head to check its commits and
+  run the tests its changes reach. A passing local `pr-check` verifies
+  the topic tip for the push hook if it has no passing verdict. The
+  `full-ci` label adds the full suite (ADR-0091). `tools/stop-gate.sh`
+  stops a stuck hook or test run in the current checkout.
 - **`tools/ci-reuse.sh`**: whether a push needs the suite again (ADR-0069).
   Finds the nearest green `main` commit, holds the diff to an allow-list of
   version-only and prose changes and prints `skip=true|false`; fails
@@ -2444,7 +2596,7 @@ refusal histogram, what picks the cycle after the reader's.
 | Primitives (box, cylinder) | `ops::primitive_box`, `ops::primitive_cylinder` |
 | Extrude / revolve of a sketched profile with holes | `ops::extrude`, `ops::revolve` over `Profile` (lines, arcs and elliptic arcs; a revolve refuses an elliptic segment, ADR-0014) |
 | Boolean union / intersect / cut | `ops::fuse`, `ops::common`, `ops::cut` |
-| Cut or fuse many tools at once (a pattern of holes or bosses) | `ops::cut_many`, `ops::fuse_many` (ADR-0050): one decomposition over the body and every tool, provenance naming each tool; tools that overlap one another and the triple points where three operands' sections cross included, tools flush with one another and with the target, a tool repeated by value; tools touching along a ruling or an edge refused (`TangentContact`, `NonManifold`) |
+| Cut or fuse many tools at once (a pattern of holes or bosses) | `ops::cut_many`, `ops::fuse_many` (ADR-0050): one decomposition over the body and every tool, provenance naming each tool; tools that overlap one another and the triple points where three operands' sections cross included, tools flush with one another and with the target, a tool repeated by value; tools touching along a ruling or shared edge can fuse as touching lumps (ADR-0088, ADR-0090); a ruling contact or shared edge within one lump is refused (`TangentContact`, `NonManifold`) |
 | Transform (geometry only, topology and index order preserved) | `ops::transform` — new ids, provenance `Modified` one-to-one in iteration order |
 | Mirror a body in a plane | `ops::mirror` — new ids, provenance `Modified` one-to-one, the image a solid with its material inside (ADR-0031) |
 | Fillet / chamfer of named edges, one call for all edges | `ops::fillet`, `ops::chamfer` (ADR-0007) |

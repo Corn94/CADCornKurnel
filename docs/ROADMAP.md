@@ -21,8 +21,9 @@ healing, the writer's length unit; done 2026-10-12, ADR-0057 to ADR-0060),
 then **C10** (the NURBS cycle: NURBS operands, sweep and loft; done
 2026-10-22, ADR-0061 to ADR-0065, ADR-0067, ADR-0068), then **C11** (the
 blend residue: the fillets the real parts and scripts were refused; done
-2026-11-04, ADR-0070 to ADR-0084), then **C12** (the plugin CAD's
-remaining asks: draft and thicken, then `region2`).
+2026-11-04, ADR-0070 to ADR-0084), then **C12** (the training harness's
+refusals: the programs it runs that Open CASCADE builds, re-scoped
+2026-11-16 from the plugin CAD's remaining asks by ADR-0020's amendment).
 An unopened cycle carries
 a name, not a number: it takes its number when `/close-cycle` opens its
 section (ADR-0020).
@@ -906,7 +907,7 @@ overhang tips; a junction whose tangent edge leans; the saddle cell of a
 walked blend beside a B-spline wall; corners the closed forms do not cover
 (the flush fan, a walked junction on a seam, a cusp of two blended edges);
 the parallel-cylinder row of the blend table (ADR-0036 §5). Beside the
-cycle: draft and thicken, *not started; C12's theme*.
+cycle: draft and thicken, *not started; C12's theme until its re-scope, now the named cycle "the plugin CAD's remaining asks"*.
 
 **Out:** variable-radius blends and the chamfer's other modes (two
 distances, a distance and an angle); the attribute cycle; IGES and
@@ -922,63 +923,93 @@ blend properties extended over the new cases; no panic.
 
 ---
 
-## C12 — the plugin CAD's remaining asks
+## C12 — the training harness's refusals
 
-*Goal: the plugin CAD's last recorded asks are API it can call. A face is
-drafted about a neutral plane or a parting line, a sheet is thickened into
-a solid, and a sketcher shades exactly the regions `extrude` accepts
-through a public `region2`. Chosen at C11's close by ADR-0020's amendment
-of 2026-09-26 (a consumer blocked on missing API ranks first), since the
-histogram no longer ranks a kernel cycle: over the 38 real parts every
-kernel row is 0 (NURBS, the blend network, sweep, healing; the nightly of
-2026-11-03), and the 3 parts still blocked all stop at `read` on the
-reader's own subset (faceted 1, outside the subset 1, unparsed 1). The
-script corpus refuses 1 of its 71 stages (`SurfaceCollapses` at shell),
-and no consumer has reported a regression. The plugin CAD's open asks
-(`docs/ideas/plugin-cad-consumer-asks.md`) are A7's draft and thicken,
-unstarted in the side slots of C10 and C11, A5's `region2`, and free-edge
-sewing, which no part of the corpus needs (ADR-0058 §6).*
+*Goal: a program the training harness runs, and Open CASCADE builds, builds
+in Arris checker-green or is refused by a modelled name; never an
+`OpInternalError` and never an `Ok` body the checker refuses. The harness
+scores a body exactly where `interference` refuses it. Opened 2026-11-04
+as the plugin CAD's remaining asks, and re-scoped 2026-11-16 by ADR-0020's
+amendment of that date. Since 0.10.0, the training harness (a consumer
+that runs generated code-CAD programs through the binding and scores their
+bodies) has filed eleven refusals over its benchmark corpus. Each is a
+fixture with a closed form, and together they reach about 1,100 programs.
+The plugin CAD has reported nothing. Its draft, thicken and `region2` are
+the named cycle next in line.*
 
-**In:**
+**In**, in the order planned:
 
-- Draft (A7): faces tapered by an angle about a neutral plane or a
-  parting line, on planes a plane turned about a line and on a cylinder a
-  cone (ADR-0047's line), with provenance, an operand of every boolean and
-  blend; what has no exact draft refused by name.
-- Thicken (A7): a sheet body (ADR-0057) grown into a solid on one side or
-  both, through the offset ADR-0048 built, with provenance; the modelling
-  layer's sheet values as its input where the binding has them.
-- `region2` as public API over `Curve2` with exact predicates (A5),
-  weighed against the backlog's narrowing of `pub` internals; the exact
-  polygon–polygon overlap S5's coincident arm waits on rides on it.
-- Beside the cycle, in the second plan slot: the nightly's open findings
-  (the two panics are fixed). The refactor-after-c11 sequence is done:
-  blend properties and census code are filed by family, fixture lint by
-  check, and loft properties and recipes share their section builder;
-  test selections, census tables and lint diagnostics are unchanged.
+- Exact point classification in the binding: `classify_points`, a batch
+  of points in, in/out/on per point. **Done**, with its pruned `on` pass
+  and a speed bar of 0.6 s for 10,648 points on a 269-face part.
+- A flat internal edge read as a tangent contact: a chained fuse on a
+  shared end plane, a third slot across a cylinder, `interference` of one
+  part split two ways, a bore over a bore of its width. **Done**: an edge
+  piece is placed on a face once, a section block along a third operand's
+  edge is that edge, and an operand that shares entities with an earlier
+  one is decomposed as its copy (ADR-0087); the five fixtures build to
+  Open CASCADE's values, and a curve entered twice is a named kernel fault,
+  never `TangentContact`. The chain property of its random boxes and
+  cylinders waits on three refusals of another family (a flush top's edge
+  asked against a plane: `regression/two-boxes-on-one-plane-fuse-unsupported`,
+  `chained-fuse-three-boxes-and-cylinder-unsupported`,
+  `fuse-many-three-boxes-plane-against-plane-unsupported`).
+- Tangency faults: an operand tangent inside another, a tool tangent
+  to a bore, two chamfers that use up a face, contacts that end in an
+  internal error. **Done** (2026-11-17): a touch between a section and a
+  rim, or between two edges, is a vertex of both when the curve runs inside
+  both faces beside it, and a crescent is one loop through it twice; a node
+  orders a touch by the analytic curve's tangent. Five cases build
+  `Full`-green to their closed forms (a cylinder tangent inside another, a
+  bar with a boss tangent to each end, a plate whose arc is tangent inside a
+  cylinder, a bore cut by a column tangent along four lines, an end disc
+  tangent to a wall), and a ruling a hair off the seams builds. A frustum
+  and a box that touch at one point of a rim fuse as two touching lumps on
+  both sides of the seam. Two chamfers that use up the face between them
+  are refused `BlendTooLarge`. Open: a seam crossing a cap a few
+  tolerances inside the rim (the cusp), a touch merged into a vertex, and
+  `fuse_many` of a cylinder tangent inside a slab's side (backlog).
+- A revolve whose arc's circle reaches the axis while the arc stays on
+  one side: the spindle torus's outer part, and the half horn torus
+  (`docs/ideas/revolve-circle-meets-the-axis.md`).
+- Operands that touch only along a curve or at an isolated point fuse to one
+  solid of touching lumps (ADR-0088, ADR-0089). The harness's torus-link,
+  ball-knob and hinge pairs cut to their targets and have empty commons.
+  A later fuse can cover the point of contact. A join that leaves the contact
+  exposed within one lump returns `TangentContact`. Shared edges and
+  vertices are copied per shell for edge-touching boxes, the crossing
+  cylinders' cut, and both frustum–box rim contacts (ADR-0090). A later
+  bridge over the whole shared contact joins the lumps. A bridge that
+  leaves contact exposed within one lump returns `NonManifold`.
+- A body's tight bounds where a NURBS edge reaches them
+  (`docs/ideas/tight-body-bounds.md`).
+- Beside the cycle, in the second plan slot: the nightly's open findings,
+  and the publish retry (`docs/ideas/publish-survives-index-timeout.md`)
+  before the next tag.
 
-**Out:** free-edge sewing (a backlog line until a part asks it); faceted
-solids and the reader's other refused subsets; variable-radius blends and
-the chamfer's other modes; the attribute cycle; IGES and same-domain face
-merging; sheet operands of the boolean; two NURBS faces flush over an area.
+**Out:** draft, thicken and `region2` (the named cycle "the plugin CAD's
+remaining asks"); `interference` of a cone face against a cone face (a
+backlog line, since exact classification covers the harness there);
+free-edge sewing; faceted solids and the reader's other refused subsets;
+variable-radius blends and the chamfer's other modes; IGES and same-domain
+face merging; sheet operands of the boolean.
 
-**Accept:** draft and thicken fixtures on every analytic face kind they
-take match Open CASCADE (`BRepOffsetAPI_DraftAngle`,
-`BRepOffsetAPI_MakeThickSolid`) within the fixture's tolerance, each body
-checker-green, the rest a typed refusal naming the face; properties over
-random poses (a draft of angle 0 is the body, thicken's volume against the
-sheet's area times the distance on a plane); the capability matrix, the
-binding and its stubs carry both; `region2`'s predicates exact under a
-property against its own subdivision; the histogram and the script corpus
-re-run and printed, no row above C11's close; no panic.
+**Accept:** every harness program of the in list is a fixture under
+`tests/fixtures/` with Open CASCADE's values (or its closed form under
+ADR-0015 where the oracle is off). Each one builds checker-green within its
+tolerance, or is the typed refusal its idea's decision names. None of them
+is an `OpInternalError` or an `Ok` body the checker refuses.
+`classify_points` agrees with the oracle's probe classes on every fixture
+that has probes. The histogram and the script corpus are re-run and
+printed, with no row above C11's close, and no panic.
 
 ---
 
 ## Beside the cycles
 
-Two lines of work that are not cycles. Neither changes a public type or a
-signature, so neither earns a minor version (`.agents/rules/git.md`
-§Tags); each stands beside whatever cycle is open (ADR-0020).
+These lines of work stand beside whichever cycle is open (ADR-0020).
+The process and tooling changes follow the release rules in
+`.agents/rules/git.md` §Tags.
 
 **The refactor sequence** (the `refactor-after-c10` review, option B).
 `small-seams` landed 2026-10-23: the union-find, golden-section minimiser,
@@ -1015,8 +1046,13 @@ at retirement, in CI, nightly, at cycle close and at release.
 **The reuse gate** (ADR-0069). A push whose diff from the nearest green
 commit of `main` is version-only (strings, changelog, prose no test reads)
 skips CI's hours-long jobs, which `tools/ci-reuse.sh` decides and fails
-closed on; a release costs one full run, not three. The `parallel` job is
-sharded four ways like `test`.
+closed on. The full run has four `parallel` shards and eight `test` shards.
+
+**Outside contributions** (ADR-0091). Contributors check their fork's
+topic branch with `tools/pr-check.sh` before opening a pull request.
+Pull requests run the cheap jobs and the reached tests by default.
+The maintainer adds `full-ci` to run the full suite before landing code
+through a locally verified rebase.
 
 **The measuring harness.** It measures what decides the cycle after C4
 (ADR-0024). The oracle answers from a cache keyed on every input it
@@ -1107,6 +1143,15 @@ swap, and the histogram after (ADR-0020). Each cycle earns its own
 section, with an acceptance corpus and a number, when `/close-cycle`
 opens it.
 
+- **The plugin CAD's remaining asks**: draft, faces tapered about a
+  neutral plane or a parting line (a plane turned about a line on planes,
+  a cone on a cylinder, ADR-0047); thicken, a sheet body (ADR-0057) grown
+  into a solid through ADR-0048's offset; and `region2` as public API over
+  `Curve2` with exact predicates, which S5's exact polygon–polygon overlap
+  rides on (A5 and A7 of `docs/ideas/plugin-cad-consumer-asks.md`).
+  Opened as C12 and moved out at its re-scope; next in line by ADR-0020's
+  amendment of 2026-11-16, unless the training harness's next refusals
+  outrank it.
 - **The attribute cycle** — attributes a consumer attaches to entities,
   carried through every operation by declared rules over the split order
   ADR-0009 fixes, for a consumer with no naming scheme of its own

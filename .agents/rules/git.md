@@ -46,11 +46,19 @@
   `sleep` loop, or a `tail --pid`/`tail -f`, waiting on one is never
   written: the completion notification is the wait. In Claude Code
   `tools/bash-guard.sh` refuses it (a PreToolUse hook).
+  In Codex, use a completion notification if the runner offers one.
+  Otherwise start a detached job, retain its log, and write its exit
+  status on completion. Continue independent work, then use one
+  interruptible completion wait if available. If the runner only offers
+  short timed waits, schedule a status check near the expected finish if
+  supported. With neither mechanism, return the job ID and result path so
+  the run can resume from them. Each status check reads the result first
+  and opens the log only for a failure or a missed expected finish.
 - **The full gate** is `tools/full-gate.sh <log>`, run with
   `run_in_background`: the layer rule, fmt, clippy `-D warnings`, nextest
   over the workspace (256 cases, `real_*` included), the doctests, `cargo
   doc` with warnings denied. Every stage runs; its last lines name each red
-  stage and test. It runs once per plan that reaches the code (`/retire-plan`,
+  stage and test. It runs once per plan that requires it (`/retire-plan`,
   on the tip's own tree by `tools/at-commit.sh` so fixes go on beside it,
   ADR-0081), at
   `/close-cycle` and `/release`. CI runs it at 1000 cases plus the
@@ -61,9 +69,9 @@
   prose no test reads (`tools/ci-reuse.sh`, ADR-0069) skips the
   hours-long jobs: a release's CI run rests on the commit it was cut from
   and is short.
-- Commit **directly to `main`**, one plan step per commit. Branch
-  (`plan/<slug>`, rebased, `merge --ff-only`, deleted after) only when a
-  plan may be thrown away or the human asked to review first.
+- For maintainer work, commit **directly to `main`**, one plan step per
+  commit. Branch (`plan/<slug>`, rebased, `merge --ff-only`, deleted after)
+  only when a plan may be thrown away or the human asked to review first.
 - Never rewrite `main` (no amend of a pushed commit, no force-push, no
   rebase). Never push unless asked.
 - Stage deliberately: read `git status` and `git diff`, no blind `git add
@@ -72,6 +80,15 @@
   with an intentional geometry change, and the message says `fixtures:`
   and why. Oracle values do not drift; if they changed, the body says
   whether the fixture or the oracle script did.
+
+## Pull requests
+
+Outside contributors work on a branch from a fork and propose the changelog bullet in the PR.
+The maintainer writes the `CHANGELOG.md` and `docs/adr/` edits at landing (ADR-0091).
+All outside PRs land through the maintainer's rebase, with the static and test halves run on the final tip.
+Code PRs first need green `full-ci` on the merge of the pinned canonical base and reviewed PR head.
+`/review-pr <n> --land` authorizes pushing the verified tip to the PR head, then fast-forwarding and pushing `main`.
+Without PR edit rights, push the verified tip to `main` and close the PR with its landed commit ids.
 
 ## Message format
 
@@ -135,4 +152,4 @@ Name any public type or signature it changes.
 
 While executing a plan: run checks, commit each step, tick boxes, edit the
 plan. Branching, tagging, pushing, resetting, rewriting and publishing are
-asked first.
+asked first. The landing invocation above is the ask for its pushes.

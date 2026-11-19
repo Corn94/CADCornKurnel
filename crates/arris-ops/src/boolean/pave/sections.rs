@@ -1,14 +1,15 @@
 //! The section curves of the face pairs, cut into blocks and kept as section edges with their pcurves, or laid along an operand edge as an image.
 
 use arris_geom::{
-    Curve, Curve2, MeetKind, SurfaceIntersection, curves_coincide, pcurve_ending_on, pcurve_on,
+    Curve, Curve2, CurveSurfaceIntersection, MeetKind, SurfaceIntersection, curves_coincide,
+    intersect_curve_surface, pcurve_ending_on, pcurve_on,
 };
 use arris_math::{
     Interval, Point2, Point3, RELATIVE_ROUNDING, Tolerance, Vec2, period_end, wrap_into,
 };
 use arris_topo::{EdgeId, FaceId};
 
-use arris_check::domain::bands;
+use arris_check::domain::{bands, shifts};
 
 use super::{Along, Block, Build, End, VertexBuild, geometry, samples, tolerance_of};
 use crate::boolean::faces::{EdgeInfo, FaceInfo};
@@ -70,7 +71,9 @@ impl<'m, 'c> Build<'m, 'c> {
     /// closed curve — a ball in a bore of its radius, along the circle
     /// they share — the last block wraps round to the first pave, as a
     /// section loop's does, and a curve no edge reaches is one block, a
-    /// contact when it is interior to both faces.
+    /// contact when it is interior to both faces. Where a third operand's
+    /// boundary crosses the curve, a pave separates blocks whose pieces
+    /// can have different selections.
     pub(super) fn contact_curve(
         &mut self,
         pi: usize,
@@ -96,7 +99,18 @@ impl<'m, 'c> Build<'m, 'c> {
                 }));
             }
         }
+        if self.operands.len() > 2 {
+            let range = curve.period().map(|_| curve.domain()).or_else(|| {
+                let lo = paves.iter().copied().reduce(f64::min)?;
+                let hi = paves.iter().copied().reduce(f64::max)?;
+                Interval::new(lo, hi).ok().filter(|r| r.length() > 0.0)
+            });
+            if let Some(range) = range {
+                paves.extend(self.contact_cuts(pi, curve, range)?);
+            }
+        }
         paves.sort_by(f64::total_cmp);
+        paves.dedup();
         let mut blocks: Vec<(f64, f64)> = paves.windows(2).map(|w| (w[0], w[1])).collect();
         if let Some(period) = curve.period() {
             match (paves.first(), paves.last()) {
@@ -136,6 +150,55 @@ impl<'m, 'c> Build<'m, 'c> {
             });
         }
         Ok(())
+    }
+
+    /// Parameters where a third operand's faces meet the contact curve.
+    /// They divide the contact for selection and make no section vertex.
+    fn contact_cuts(
+        &self,
+        pair: usize,
+        curve: &Curve,
+        range: Interval,
+    ) -> Result<Vec<f64>, OpError> {
+        let [oa, ob] = self.pairs[pair].operands;
+        let (fa, fb) = self.pair_infos(pair);
+        let bounds = curve.bounds(range);
+        let mut cuts = Vec::new();
+        for (side, faces) in self.faces.iter().enumerate() {
+            if side == oa || side == ob {
+                continue;
+            }
+            for fc in faces {
+                if !fc.bounds.intersects(&fa.bounds) || !fc.bounds.intersects(&fb.bounds) {
+                    continue;
+                }
+                let tol = tolerance_of(
+                    &self.precision,
+                    fa.tolerance.max(fb.tolerance),
+                    fc.tolerance,
+                );
+                if let Some(bounds) = bounds
+                    && !bounds.inflated(tol.linear).intersects(&fc.bounds)
+                {
+                    continue;
+                }
+                self.tick()?;
+                let hits = self
+                    .metered(|mt| intersect_curve_surface(curve, fc.surface, tol, mt))
+                    .map_err(|e| geometry(e, fa.shape(), fc.shape()))?;
+                if let CurveSurfaceIntersection::Points(hits) = hits {
+                    for hit in hits {
+                        let t = curve
+                            .period()
+                            .map_or(hit.t, |p| wrap_into(hit.t, range.lo(), p));
+                        if range.contains(t) && self.on_face(fc, hit.point)?.is_some() {
+                            cuts.push(t);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(cuts)
     }
 
     /// One section curve: its paves from the vertices on it, a seed
@@ -351,6 +414,15 @@ impl<'m, 'c> Build<'m, 'c> {
             })
             .collect();
         drop(along);
+        // Each block's ends and midpoint, for a block whose midpoint the
+        // polygons put on a face's boundary to look past its ends.
+        let mids: Vec<(usize, usize, Point3)> = blocks
+            .iter()
+            .map(|&(lo, hi, start, end)| {
+                let mid = Interval::new(lo, hi).map_or(0.5 * (lo + hi), |r| r.midpoint());
+                (start, end, curve.point(mid))
+            })
+            .collect();
         let mut edges = Vec::new();
         for (k, (lo, hi, start, end)) in blocks.into_iter().enumerate() {
             if is_an_edge[k] {
@@ -385,9 +457,17 @@ impl<'m, 'c> Build<'m, 'c> {
                 }
                 continue;
             }
-            let Some(uv) = Self::inside_both(fa, fb, curve.point(range.midpoint())) else {
+            // Inside both faces, the ends deciding where the polygons put
+            // the midpoint on one face's boundary.
+            let Some(uv) = self.inside_block(fa, fb, &mids, k)? else {
                 continue;
             };
+            // Along an edge of a third operand lying in both faces, it is
+            // that edge's piece on each, as along an edge of either.
+            if let Some(placed) = self.along_third(pi, fa, fb, curve, range, start, end) {
+                self.along.extend(placed);
+                continue;
+            }
             // A section edge another pair already made on a face this one
             // holds: that edge, given its pcurve on this pair's other face.
             if let Some((k, shared, tolerance)) =
@@ -580,7 +660,11 @@ impl<'m, 'c> Build<'m, 'c> {
     /// are one section by their surfaces: a face beside `fa` using `ea`
     /// and one beside `fb` using `eb` lie on one surface too, so both
     /// edges lie on the section of the two surfaces, and they are the
-    /// same curve when `ea`'s midpoint lies on `eb` within `tol`.
+    /// same curve when `ea`'s midpoint lies on `eb` within `tol`. Where the
+    /// face beside an edge lies on the other face's surface too — an edge
+    /// two coplanar pieces of one operand share — the faces have no
+    /// section, the edge is any curve on the plane, and the midpoint says
+    /// nothing: two edges crossing at it are not one curve.
     pub(super) fn same_section(
         &self,
         ea: &EdgeInfo<'m>,
@@ -593,6 +677,9 @@ impl<'m, 'c> Build<'m, 'c> {
         else {
             return false;
         };
+        if self.beside_on(oa, ea.id, fa.id, fb.id) || self.beside_on(ob, eb.id, fb.id, fa.id) {
+            return false;
+        }
         let beside = self.faces[ob]
             .iter()
             .filter(|g| g.id != fb.id && g.edges().contains(&eb.id))
@@ -631,32 +718,117 @@ impl<'m, 'c> Build<'m, 'c> {
         start: usize,
         end: usize,
     ) -> Option<(EdgeId, Block)> {
-        let (start, end) = (End::Section(start), End::Section(end));
         let points: Vec<Point3> = samples(range, self.precision.check_samples)
             .into_iter()
             .map(|t| curve.point(t))
             .collect();
-        for &eid in f.edges() {
-            let Some(e) = self.edge_info(side, eid) else {
-                continue;
-            };
-            let within = e.tolerance.max(fa.tolerance.max(fb.tolerance));
-            for block in self.blocks_of(e) {
-                let ends = (self.canonical(block.start), self.canonical(block.end));
-                if ends != (start, end) && ends != (end, start) {
-                    continue;
-                }
-                let lies_along = points.iter().all(|&p| {
+        f.edges().iter().find_map(|&eid| {
+            let e = self.edge_info(side, eid)?;
+            let block = self.piece_along(e, fa, fb, &points, start, end)?;
+            Some((eid, block))
+        })
+    }
+
+    /// The piece of `e` between section vertices `start` and `end`, in
+    /// either order, that every one of `points` — a block of a section
+    /// curve of the pair `fa`, `fb`, at the model's check parameters —
+    /// lies within the tolerance of, inside the piece's own range.
+    fn piece_along(
+        &self,
+        e: &EdgeInfo<'m>,
+        fa: &FaceInfo<'m>,
+        fb: &FaceInfo<'m>,
+        points: &[Point3],
+        start: usize,
+        end: usize,
+    ) -> Option<Block> {
+        let (start, end) = (End::Section(start), End::Section(end));
+        let within = e.tolerance.max(fa.tolerance.max(fb.tolerance));
+        self.blocks_of(e).into_iter().find(|block| {
+            let ends = (self.canonical(block.start), self.canonical(block.end));
+            (ends == (start, end) || ends == (end, start))
+                && points.iter().all(|&p| {
                     e.curve.project(p).is_ok_and(|on| {
                         on.distance <= within
                             && e.in_range(on.t)
-                                .is_some_and(|t| Self::within_block(e, block.range, t))
+                                .is_some_and(|t| Self::within_period_of_block(e, block.range, t))
                     })
-                });
-                if lies_along {
-                    return Some((eid, block));
-                }
+                })
+        })
+    }
+
+    /// The piece of an edge of a third operand — neither of pair `pi`'s —
+    /// that the block `range` of `curve` of the pair `fa`, `fb`, from
+    /// section vertex `start` to `end`, lies along, where the edge lies on
+    /// both faces' surfaces: the piece placed on each face as an image,
+    /// each under a pair of that face and a face of the edge's own, in
+    /// place of a section edge on both. A bore's rim on the hole wall of
+    /// its width, crossed there by a counterbore's top: the rim is imaged
+    /// on the wall and on the top through the bore's faces coincident
+    /// with them, and a section edge beside it would enter one curve
+    /// twice on each. `None` when no such piece is along the block, or
+    /// when a face has no pair to place it under.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn along_third(
+        &self,
+        pi: usize,
+        fa: &FaceInfo<'m>,
+        fb: &FaceInfo<'m>,
+        curve: &Curve,
+        range: Interval,
+        start: usize,
+        end: usize,
+    ) -> Option<[Along; 2]> {
+        let [oa, ob] = self.pairs[pi].operands;
+        let mut points: Vec<Point3> = Vec::new();
+        for &(eid, face) in &self.coincident {
+            if face != fa.id || !self.coincident.contains(&(eid, fb.id)) {
+                continue;
             }
+            let Some(side) = self.operand_of_edge(eid) else {
+                continue;
+            };
+            if side == oa || side == ob {
+                continue;
+            }
+            let Some(e) = self.edge_info(side, eid) else {
+                continue;
+            };
+            if points.is_empty() {
+                points = samples(range, self.precision.check_samples)
+                    .into_iter()
+                    .map(|t| curve.point(t))
+                    .collect();
+            }
+            let Some(block) = self.piece_along(e, fa, fb, &points, start, end) else {
+                continue;
+            };
+            // A pair of `target` and a face of the edge's own operand
+            // that uses it: the image's pair, as a coincident neighbour's.
+            let under = |target: FaceId| {
+                self.pairs.iter().position(|p| {
+                    let g = if p.a == target {
+                        p.b
+                    } else if p.b == target {
+                        p.a
+                    } else {
+                        return false;
+                    };
+                    self.faces[side]
+                        .iter()
+                        .any(|h| h.id == g && h.edges().contains(&eid))
+                })
+            };
+            let (Some(pa), Some(pb)) = (under(fa.id), under(fb.id)) else {
+                continue;
+            };
+            let along = |pair: usize, block: Block| Along {
+                pair,
+                operand: side,
+                edge: eid,
+                block,
+            };
+            return Some([along(pa, block.clone()), along(pb, block)]);
         }
         None
     }
@@ -706,6 +878,15 @@ impl<'m, 'c> Build<'m, 'c> {
             0.0
         };
         t >= range.lo() - slack && t <= range.hi() + slack
+    }
+
+    /// [`Self::within_block`] for `t` or a period from it: on a closed
+    /// edge the point where it closes is both ends of its range, and a
+    /// projection names it at the start whatever block it ends. A low
+    /// cylinder's top rim, crossed by a box's wall, ends its last block
+    /// at its own vertex, which the rim's projection reads as `t` = 0.
+    fn within_period_of_block(e: &EdgeInfo<'m>, range: Interval, t: f64) -> bool {
+        shifts(e.curve.period()).any(|d| Self::within_block(e, range, t + d))
     }
 
     /// A kept block as a section edge: the pcurve on each face, placed

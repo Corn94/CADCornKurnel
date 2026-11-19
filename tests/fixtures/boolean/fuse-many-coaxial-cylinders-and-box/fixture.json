@@ -1,0 +1,91 @@
+{
+  "description": "a cylinder of radius 2 and height 1 on the plane z = 0, a box [-2, 4] x [-2, 2] x [0, 1] and a cylinder of the first one's radius and axis, 2 high, fused in one call (the shrunk draw of the chained-fuse property, plans/flat-edge-read-as-tangent-contact step 6, shard 2). Nothing is tangent: the slab's top crosses the tall cylinder's wall in the low cylinder's top rim, which is imaged on both through the low cylinder's coincident top and wall. The section block that ends at the rim's own vertex was read as off the rim, since a projection names that vertex at the start of the rim's range, and became a section edge beside the images: one curve entered twice on a face, which the arrangement guards as an invariant fault. A point of a closed edge is now within a block a period from its projection. The desired answer is the union, which the chain of fuses builds too and Open CASCADE matches",
+  "steps": [
+    {
+      "name": "low",
+      "op": "cylinder",
+      "base": [
+        -1,
+        -1,
+        0
+      ],
+      "axis": [
+        0,
+        0,
+        1
+      ],
+      "radius": 2,
+      "height": 1
+    },
+    {
+      "name": "slab",
+      "op": "box",
+      "min": [
+        -2,
+        -2,
+        0
+      ],
+      "max": [
+        4,
+        2,
+        1
+      ]
+    },
+    {
+      "name": "tall",
+      "op": "cylinder",
+      "base": [
+        -1,
+        -1,
+        0
+      ],
+      "axis": [
+        0,
+        0,
+        1
+      ],
+      "radius": 2,
+      "height": 2
+    },
+    {
+      "name": "result",
+      "op": "fuse",
+      "bodies": [
+        "low",
+        "slab",
+        "tall"
+      ]
+    }
+  ],
+  "result": "result",
+  "probes": [
+    {
+      "label": "in_tall",
+      "point": [
+        -1,
+        -2.5,
+        1.5
+      ],
+      "expect": "in"
+    },
+    {
+      "label": "in_slab_only",
+      "point": [
+        3,
+        1,
+        0.5
+      ],
+      "expect": "in"
+    },
+    {
+      "label": "above_slab",
+      "point": [
+        3,
+        1,
+        1.5
+      ],
+      "expect": "out"
+    }
+  ],
+  "analytic": {}
+}

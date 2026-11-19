@@ -483,6 +483,7 @@ pub fn blocks_reason_named(
             } else if r.contains("not a solid") || r == "NotSolid" {
                 Cycle::Healing
             } else if r.contains("touch along an edge")
+                || r.contains("share an edge or a vertex")
                 || r.contains("touch along a curve")
                 || r == "NonManifold"
                 || r == "TangentContact"
@@ -1204,7 +1205,9 @@ mod tests {
             blocks_reason_named(
                 "fillet",
                 "OpDegenerateError",
-                Some("the blend leaves its face through an edge that is not the corner's own"),
+                Some(
+                    "the blend does not fit its faces: it leaves its face through an edge that is not the corner's own, or two blends' contacts on one face cross or swap order"
+                ),
                 None,
                 None
             ),
@@ -1255,7 +1258,7 @@ mod tests {
                 "cut",
                 "OpDegenerateError",
                 Some(
-                    "the result's shells would touch along an edge or at a vertex, which a solid does not hold"
+                    "the result's shells would share an edge or a vertex, or a shell touch itself at one, which a solid does not hold"
                 ),
                 None,
                 None

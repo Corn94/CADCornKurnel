@@ -7,24 +7,38 @@
 //! (a seam vertex has two), half-edges for every loop piece — one-sided,
 //! since the face has no material on the loop's right — and two for every
 //! section edge. At each node the half-edges leaving it are ordered by
-//! the angle of their pcurve's tangent, ties within the model's angular
+//! the angle of their tangent in (u, v), ties within the model's angular
 //! tolerance by the signed curvature, and a tie of both is
-//! [`BooleanReason::TangentContact`]. A region is walked by taking, at the end
+//! [`BooleanReason::TangentContact`], unless the two are one curve
+//! entered twice, which is a kernel fault. A region is walked by taking, at the end
 //! of each half-edge, the next half-edge clockwise from the direction
 //! one came from; a cycle turning once counter-clockwise bounds a region
 //! and one turning clockwise is a hole, assigned to the innermost
 //! counter-clockwise cycle that winds around it.
+//!
+//! A half-edge's tangent and curvature at a node are its analytic 3D curve's,
+//! carried into (u, v) through the surface's derivatives there: a fitted
+//! pcurve is held to its curve in position, not in direction, and a
+//! section fitted on a cylinder leaves the point where it touches the
+//! face's rim about a tenth of a micro-radian off the rim's own
+//! direction, more than the angular tolerance that decides the tie. Only
+//! where the surface is singular, or the edge has no analytic 3D curve —
+//! a NURBS one is fitted as its pcurve is — is the pcurve's own tangent
+//! read.
 
 use arris_math::real;
 use core::f64::consts::{PI, TAU};
 use std::collections::{BTreeMap, BTreeSet};
 
-use arris_geom::region2::{Piece as Walk, Polygon2, discretise, interior_point};
-use arris_geom::{Curve2, Surface};
-use arris_math::{Interval, Point2, Point3, Precision, is_negligible, wrap_angle};
+use arris_geom::region2::{Piece as Walk, Polygon2, Side, SideIndex, discretise, interior_point};
+use arris_geom::{Curve, Curve2, CurveEval, Surface};
+use arris_math::{
+    ISOLATED_TOUCH_RETRY_DIVISORS, Interval, Point2, Point3, Precision, Vec2, Vec3, is_negligible,
+    wrap_angle,
+};
 use arris_topo::{Curve2Id, EdgeId, FaceId, Model, Orientation, Shape};
 
-use arris_check::domain::chord;
+use arris_check::domain::{band, chord};
 
 use crate::error::{BooleanReason, Fault, OpError, Reason, SplitFault};
 use crate::rebuild::{ERef, PieceUse, SubEdge, VRef};
@@ -78,6 +92,72 @@ pub(super) struct FacePiece {
     pub interior: Point3,
     /// Its (u, v).
     pub uv: Point2,
+}
+
+impl FacePiece {
+    /// Candidate samples on the original surface, in this piece's own
+    /// translate and clear of its pcurves. Rebuild the polygons only
+    /// when selection needs another point.
+    pub(super) fn retry_points(
+        &self,
+        m: &Model,
+        face: FaceId,
+        range_of: impl Fn(ERef) -> Option<Interval>,
+    ) -> Result<impl Iterator<Item = Point3>, OpError> {
+        let entity = m.face(face)?;
+        let surface = m.surface(entity.surface())?;
+        let tolerance = m.precision().parametric_tolerance;
+        let chord = chord(m, entity, surface, tolerance);
+        let rings = self
+            .loops
+            .iter()
+            .map(|ring| {
+                let walks = ring
+                    .iter()
+                    .map(|u| {
+                        let range =
+                            range_of(u.edge).ok_or(OpError::Internal(Fault::Invariant {
+                                what: "a piece edge's range for resampling",
+                            }))?;
+                        Ok(Walk {
+                            curve: m.curve2(u.pcurve)?,
+                            range,
+                            reversed: u.orientation.is_reversed(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, OpError>>()?;
+                Ok(discretise(&walks, chord))
+            })
+            .collect::<Result<Vec<_>, OpError>>()?;
+        let (lo, hi) = rings
+            .iter()
+            .flat_map(|ring| ring.points())
+            .fold((self.uv, self.uv), |(lo, hi), p| (lo.inf(p), hi.sup(p)));
+        let span = hi - lo;
+        let deviation = rings
+            .iter()
+            .map(Polygon2::chord_deviation)
+            .fold(0.0, f64::max);
+        let side = SideIndex::new(&rings);
+        let uv = self.uv;
+        // At each scale try +u, -u, +v, -v along this piece's chart.
+        Ok(ISOLATED_TOUCH_RETRY_DIVISORS
+            .into_iter()
+            .flat_map(move |divisor| {
+                let step = span / divisor;
+                [
+                    Vec2::new(step.x, 0.0),
+                    Vec2::new(-step.x, 0.0),
+                    Vec2::new(0.0, step.y),
+                    Vec2::new(0.0, -step.y),
+                ]
+            })
+            .filter_map(move |step| {
+                let p = uv + step;
+                (p != uv && side.side(p, deviation + band(surface, p, tolerance)) == Side::Inside)
+                    .then(|| surface.point(p.x, p.y))
+            }))
+    }
 }
 
 /// A face split into its pieces.
@@ -134,15 +214,49 @@ enum Entry {
 /// false) or against its parameter, `None` where the tangent vanishes.
 fn leaving(c: &Curve2, t: f64, reversed: bool) -> Option<Dir> {
     let e = c.eval(t);
-    let d1 = if reversed { -e.d1 } else { e.d1 };
+    direction(e.d1, e.d2, reversed)
+}
+
+/// The direction of a (u, v) path with first and second derivatives `d1`
+/// and `d2`, walked along its parameter or against it, `None` where the
+/// tangent vanishes.
+fn direction(d1: Vec2, d2: Vec2, reversed: bool) -> Option<Dir> {
+    let d1 = if reversed { -d1 } else { d1 };
     let speed = d1.norm();
     if !(speed.is_finite() && speed > 0.0) {
         return None;
     }
-    Some(Dir {
+    let curvature = (d1.x * d2.y - d1.y * d2.x) / (speed * speed * speed);
+    curvature.is_finite().then(|| Dir {
         angle: wrap_angle(real::atan2(d1.y, d1.x)),
-        curvature: (d1.x * e.d2.y - d1.y * e.d2.x) / (speed * speed * speed),
+        curvature,
     })
+}
+
+/// The direction a 3D curve with derivatives `c` leaves `uv` in on
+/// `surface`, walked along its parameter or against it: its (u, v)
+/// derivatives are the solutions of `C' = S_u u' + S_v v'` and
+/// `C'' = S_uu u'² + 2 S_uv u'v' + S_vv v'² + S_u u'' + S_v v''` in the
+/// surface's tangent plane, by the first fundamental form. `None` where
+/// that form is singular to rounding at the surface's own scale — a pole,
+/// where `cos(π/2)` leaves `S_u` at `6e-17` and not `0`, an apex — or the
+/// tangent vanishes.
+fn leaving_through(surface: &Surface, uv: Point2, c: &CurveEval, reversed: bool) -> Option<Dir> {
+    let s = surface.eval(uv.x, uv.y);
+    let (e, f, g) = (s.du.dot(&s.du), s.du.dot(&s.dv), s.dv.dot(&s.dv));
+    let det = e * g - f * f;
+    let scale = e.max(g);
+    if !det.is_finite() || is_negligible(det, scale * scale) {
+        return None;
+    }
+    let solve = |w: Vec3| {
+        let (a, b) = (w.dot(&s.du), w.dot(&s.dv));
+        Vec2::new((g * a - f * b) / det, (e * b - f * a) / det)
+    };
+    let d1 = solve(c.d1);
+    let d2 =
+        solve(c.d2 - s.duu * (d1.x * d1.x) - s.duv * (2.0 * d1.x * d1.y) - s.dvv * (d1.y * d1.y));
+    direction(d1, d2, reversed)
 }
 
 /// The turn from direction `from` to direction `to`, in `[−π, π)`.
@@ -175,8 +289,13 @@ struct Arrangement<'m> {
     m: &'m Model,
     face: FaceId,
     surface: &'m Surface,
+    /// The 3D curve of each section edge, by its index.
+    section_curves: &'m [&'m Curve],
     chord: f64,
     angular: f64,
+    /// The smallest distance the model distinguishes: two curves closer
+    /// than this at their middles are one.
+    distinct: f64,
     nodes: Vec<Node>,
     halves: Vec<Half>,
     /// The nodes standing for each vertex.
@@ -190,10 +309,33 @@ impl<'m> Arrangement<'m> {
         OpError::Internal(Fault::Split(fault))
     }
 
-    /// A direction of `pcurve` at `t`, or the arrangement's fault.
-    fn dir(&self, pcurve: Curve2Id, t: f64, reversed: bool) -> Result<Dir, OpError> {
+    /// The analytic 3D curve `edge` lies on, where one is at hand: an
+    /// operand edge's own — none for a degenerate edge — or a section
+    /// edge's. A NURBS curve is none: fitted itself, as a walked contact
+    /// or a section with no closed form is, its tangent is no nearer the
+    /// true one than its pcurve's.
+    fn curve_of(&self, edge: ERef) -> Result<Option<&'m Curve>, OpError> {
+        let curve = match edge {
+            ERef::Sub { edge, .. } => match self.m.edge(edge)?.curve() {
+                Some((curve, _)) => Some(self.m.curve(curve)?),
+                None => None,
+            },
+            ERef::Section(k) => self.section_curves.get(k).copied(),
+        };
+        Ok(curve.filter(|c| !matches!(c, Curve::Nurbs(_))))
+    }
+
+    /// The direction `edge`, over `pcurve`, leaves `t` in: its analytic
+    /// 3D curve's through the surface at the pcurve's (u, v), the
+    /// pcurve's own where that has none, or the arrangement's fault.
+    fn dir(&self, edge: ERef, pcurve: Curve2Id, t: f64, reversed: bool) -> Result<Dir, OpError> {
         let c = self.m.curve2(pcurve)?;
-        leaving(c, t, reversed).ok_or_else(|| self.fault(SplitFault::Turn { face: self.face }))
+        let exact = self
+            .curve_of(edge)?
+            .and_then(|curve| leaving_through(self.surface, c.point(t), &curve.eval(t), reversed));
+        exact
+            .or_else(|| leaving(c, t, reversed))
+            .ok_or_else(|| self.fault(SplitFault::Turn { face: self.face }))
     }
 
     /// The (u, v) of `pcurve` at `t`.
@@ -243,8 +385,8 @@ impl<'m> Arrangement<'m> {
         } else {
             (range.lo(), range.hi())
         };
-        let start = self.dir(pcurve, t0, reversed)?;
-        let back = self.dir(pcurve, t1, !reversed)?;
+        let start = self.dir(edge, pcurve, t0, reversed)?;
+        let back = self.dir(edge, pcurve, t1, !reversed)?;
         self.halves.push(Half {
             from,
             to,
@@ -454,6 +596,11 @@ impl<'m> Arrangement<'m> {
                         self.entry_dir(w[1]).curvature,
                     );
                     if is_negligible((ka - kb).abs(), ka.abs().max(kb.abs())) {
+                        if self.same_curve(w[0], w[1])? {
+                            return Err(OpError::Internal(Fault::Invariant {
+                                what: "one curve entered twice on a face",
+                            }));
+                        }
                         return Err(OpError::Degenerate {
                             entities: vec![
                                 Shape::new(self.face, Orientation::Forward),
@@ -468,6 +615,31 @@ impl<'m> Arrangement<'m> {
             i = j;
         }
         Ok(list)
+    }
+
+    /// `true` when two entries of one node tied in direction and
+    /// curvature are one curve: both are section edges or images, run
+    /// between the same two nodes and pass within the model's smallest
+    /// distance of each other at the middle of their ranges. A section
+    /// along a loop piece of the face is the face's boundary touched, and
+    /// two curves a thin sliver apart are two faces touching along a
+    /// curve: both are the contact. The same curve entered twice is a
+    /// section or an image placed on the face two times, a fault of the
+    /// operation and not of the input.
+    fn same_curve(&self, a: Entry, b: Entry) -> Result<bool, OpError> {
+        let ends = |e: Entry| match e {
+            Entry::Out(h) => (self.halves[h].from, self.halves[h].to),
+            Entry::Stub(h) => (self.halves[h].to, self.halves[h].from),
+        };
+        if ends(a) != ends(b) {
+            return Ok(false);
+        }
+        let (Entry::Out(x) | Entry::Stub(x), Entry::Out(y) | Entry::Stub(y)) = (a, b);
+        if self.halves[x].twin.is_none() || self.halves[y].twin.is_none() {
+            return Ok(false);
+        }
+        let mid = |h: usize| self.uv(self.halves[h].pcurve, self.halves[h].range.lerp(0.5));
+        Ok((mid(x)? - mid(y)?).norm() <= self.distinct)
     }
 
     /// `true` when two entries' angles are within the angular tolerance.
@@ -668,12 +840,16 @@ fn a_key(e: Entry) -> (usize, usize) {
 /// replaced, and of `sections` — the section edges and images on it. A
 /// face with no section edge or image and none of its edges in
 /// `touched` is untouched and has one piece, itself, still with its
-/// interior point.
+/// interior point. `section_curves` holds the 3D curve of each section
+/// edge by its index, which the order at a node reads its directions
+/// from.
 ///
 /// Errors: [`OpError::Degenerate`] with [`BooleanReason::TangentContact`] for a
-/// tie at a node; [`OpError::Internal`] with a [`SplitFault`] for an
-/// arrangement that is not a subdivision; [`OpError::NotFound`] for an id
+/// tie at a node between two curves; [`OpError::Internal`] with
+/// [`Fault::Invariant`] for a tie between one curve entered twice, and
+/// with a [`SplitFault`] for an arrangement that is not a subdivision; [`OpError::NotFound`] for an id
 /// that does not resolve.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn split_face(
     m: &Model,
     precision: &Precision,
@@ -681,6 +857,7 @@ pub(super) fn split_face(
     sub_edges: &BTreeMap<EdgeId, Vec<SubEdge>>,
     touched: &BTreeSet<EdgeId>,
     sections: &[EdgeOnFace],
+    section_curves: &[&Curve],
     alias: &BTreeMap<(ERef, Curve2Id), Alias>,
 ) -> Result<SplitFace, OpError> {
     let entity = m.face(face)?;
@@ -695,8 +872,10 @@ pub(super) fn split_face(
         m,
         face,
         surface,
+        section_curves,
         chord: chord(m, entity, surface, entity.tolerance()),
         angular: precision.angular_tolerance,
+        distinct: precision.min_tolerance,
         nodes: Vec::new(),
         halves: Vec::new(),
         images: BTreeMap::new(),
@@ -707,4 +886,89 @@ pub(super) fn split_face(
     a.order()?;
     let pieces = a.regions()?;
     Ok(SplitFace { untouched, pieces })
+}
+
+#[cfg(test)]
+mod tests {
+    use arris_geom::Curve2;
+    use arris_math::{Control, Interval, Point3, Precision, UnitVec2};
+    use arris_topo::Model;
+
+    use super::*;
+    use crate::primitive_box;
+
+    /// The first face of a box, its four corners in loop order, and the
+    /// `split_face` of it with `diagonals` section edges, each the same
+    /// diagonal from the first corner to the third.
+    fn split_with_diagonals(diagonals: usize) -> Result<SplitFace, OpError> {
+        let n = &Control::NONE;
+        let mut m = Model::default();
+        let (body, _) =
+            primitive_box(&mut m, Point3::origin(), Point3::new(2.0, 3.0, 4.0), n).unwrap();
+        let face = m.faces(body).unwrap()[0].id;
+        let coedges = m.face(face).unwrap().loops()[0].coedges().to_vec();
+        assert_eq!(coedges.len(), 4);
+        let mut sub_edges = BTreeMap::new();
+        let mut corner = Vec::new();
+        for c in &coedges {
+            let e = *m.edge(c.edge()).unwrap();
+            let reversed = c.orientation().is_reversed();
+            let (at, vertex) = if reversed {
+                (e.range().hi(), e.end())
+            } else {
+                (e.range().lo(), e.start())
+            };
+            corner.push((m.curve2(c.pcurve()).unwrap().point(at), vertex));
+            sub_edges.insert(
+                c.edge(),
+                vec![SubEdge {
+                    range: e.range(),
+                    start: VRef::Existing(e.start()),
+                    end: VRef::Existing(e.end()),
+                }],
+            );
+        }
+        let (from, to) = (corner[0], corner[2]);
+        let span = to.0 - from.0;
+        let length = span.norm();
+        let pcurve = m.add_curve2(Curve2::Line {
+            origin: from.0,
+            direction: UnitVec2::new_normalize(span),
+        });
+        let sections: Vec<EdgeOnFace> = (0..diagonals)
+            .map(|k| EdgeOnFace {
+                edge: ERef::Section(k),
+                range: Interval::new(0.0, length).unwrap(),
+                start: VRef::Existing(from.1),
+                end: VRef::Existing(to.1),
+                pcurve,
+                other: face,
+            })
+            .collect();
+        split_face(
+            &m,
+            &Precision::default(),
+            face,
+            &sub_edges,
+            &BTreeSet::new(),
+            &sections,
+            &[],
+            &BTreeMap::new(),
+        )
+    }
+
+    /// One section across a face splits it in two; the same section
+    /// entered twice is a fault of the operation naming that, never the
+    /// contact of two faces along a curve.
+    #[test]
+    fn one_curve_entered_twice_is_a_fault_not_a_contact() {
+        assert_eq!(split_with_diagonals(1).unwrap().pieces.len(), 2);
+        match split_with_diagonals(2) {
+            Err(OpError::Internal(Fault::Invariant { what })) => {
+                assert_eq!(what, "one curve entered twice on a face");
+            }
+            Err(e) => panic!("expected the invariant fault, found {e}"),
+            Ok(_) => panic!("a doubled section was split"),
+        }
+    }
 }

@@ -1,12 +1,11 @@
 //! `check`: the closure walk and the rows it evaluates.
 //!
-//! Rows implemented here: M1–M3 (`references`, `finite`), V1–V3 (`vertex`)
+//! Rows implemented here: M1–M3 (`references`, `finite`), V1–V4 (`vertex`)
 //! and E1–E7 (`edge`), one file per family (`docs/DATA-MODEL.md`
 //! §Invariants); the loop, face, shell and body rows are in
 //! `crate::topology` and the `Full` rows in `crate::full`, which `level`
-//! selects. Every row walks the body's closure in sorted id
-//! order and reports through `Report::new`, so the report is the same on
-//! every run and platform.
+//! selects. Every row walks the body's closure and reports through
+//! `Report::new`, so the report is the same on every run and platform.
 
 use std::collections::BTreeMap;
 
@@ -31,6 +30,7 @@ mod vertex;
 /// that does not resolve is one `M1` line naming the body. Never panics
 /// and never repairs: a reference that does not resolve is reported once
 /// under M1 and skipped by every other row.
+/// Booleans separately check that they introduce no new V4 pairs.
 ///
 /// ```
 /// use arris_check::{Level, check};
@@ -42,6 +42,28 @@ mod vertex;
 /// assert!(check(&m, body, Level::Fast).is_ok());
 /// ```
 pub fn check(model: &Model, body: Body, level: Level) -> Report {
+    check_with(model, body, level, false)
+}
+
+/// The Fast checker with V4 enabled, including pairs inherited from inputs.
+#[doc(hidden)]
+pub fn check_boolean_result(model: &Model, body: Body) -> Report {
+    check_with(model, body, Level::Fast, true)
+}
+
+/// V4 pairs within each shell, in deterministic shell and vertex sweep
+/// order. Errors if `body` does not resolve.
+#[doc(hidden)]
+pub fn coincident_vertices(model: &Model, body: Body) -> Result<Vec<[VertexId; 2]>, NotFound> {
+    let c = Checker::new(model, body)?;
+    Ok(c.closure
+        .shells
+        .iter()
+        .flat_map(|&shell| c.v4_coincident(&c.shell_edge_uses(shell)))
+        .collect())
+}
+
+fn check_with(model: &Model, body: Body, level: Level, distinct_vertices: bool) -> Report {
     let Ok(mut c) = Checker::new(model, body) else {
         return Report::new(vec![Violation::Unresolved {
             from: body.id.into(),
@@ -54,7 +76,7 @@ pub fn check(model: &Model, body: Body, level: Level) -> Report {
     c.vertex_rows();
     c.edge_rows();
     c.face_rows();
-    c.shell_rows();
+    c.shell_rows(distinct_vertices);
     c.body_rows();
     if level == Level::Full {
         c.full_rows();

@@ -25,9 +25,9 @@ use arris_math::nalgebra::{Quaternion, UnitQuaternion};
 use arris_math::real;
 use arris_math::{Axis, Frame, Isometry, Point3, UnitVec3, Vec3};
 
-use arris_check::{Level, check};
+use arris_check::{Level, check, lumps};
 use arris_ops::measure::MassProperties;
-use arris_ops::{BooleanReason, InputReason, OpError, Reason};
+use arris_ops::{BooleanReason, OpError, Reason};
 use arris_topo::provenance::audit;
 use arris_topo::{Body, Model, Provenance};
 use proptest::prelude::*;
@@ -210,20 +210,16 @@ prop_shards! {
         }
 }
 
-/// A cylinder touching a random face of the box from outside along a
-/// ruling through the face's interior (plan step 11): `box − cylinder`
-/// is the box — the same faces, edges and vertices by id, the same mass
-/// properties — `common` is the designed `Empty`, and `fuse`, which
-/// would keep the face and the wall touching along the contact, is the
-/// designed `TangentContact`; the model is as it was after each
-/// refusal. The touches land in both places — a box edge on the wall
-/// where the ruling crosses the face's rim, a rim circle on the face
-/// where the cylinder ends inside it — and neither paves anything.
+/// A cylinder touches a random box face from outside along a ruling
+/// through the face's interior. `cut` keeps the box's faces and mass
+/// properties, and `common` returns `Empty`. `fuse` builds two touching
+/// lumps (ADR-0088), keeps the box's faces by id and adds the volumes and
+/// areas. The contact can end at a box edge or at a cylinder rim.
 #[test]
-fn a_cylinder_tangent_to_a_box_face_leaves_the_box_and_shares_nothing() {
+fn a_cylinder_tangent_to_a_box_face_fuses_to_touching_lumps() {
     prop::check(prop::body::tangent_pair(), |pair: TangentPair| {
         prop_assume!(!touch_at_the_face_rim(&pair));
-        a_tangent_cylinder_leaves_the_box(&pair)
+        check_tangent_box_and_cylinder(&pair)
     });
 }
 
@@ -300,22 +296,24 @@ fn a_rim_grazing_the_face_edge_keeps_its_ids() {
         face: (2, false),
     };
     assert!(touch_at_the_face_rim(&pair), "the exclusion covers it");
-    if let Err(e) = a_tangent_cylinder_leaves_the_box(&pair) {
+    if let Err(e) = check_tangent_box_and_cylinder(&pair) {
         panic!("{e}");
     }
 }
 
-fn a_tangent_cylinder_leaves_the_box(pair: &TangentPair) -> Result<(), TestCaseError> {
-    let mut m = Model::default();
-    let (a, b) = pair.build(&mut m).map_err(fail)?;
-    let pa = mass_properties(&m, a).map_err(fail)?;
+fn check_tangent_box_and_cylinder(pair: &TangentPair) -> Result<(), TestCaseError> {
+    let (mut m, a, b, pa, pb) = operands_by(|m| pair.build(m))?;
     let before = dump_text(&m, a).map_err(fail)?;
-    let (body, _) = run(&mut m, "cut(box, cylinder)", cut, a, b)?;
-    let faces = |body: Body| -> Result<Vec<_>, TestCaseError> {
+    let (body, after) = run(&mut m, "cut(box, cylinder)", cut, a, b)?;
+    let faces = |m: &Model, body: Body| -> Result<Vec<_>, TestCaseError> {
         Ok(m.faces(body).map_err(fail)?.iter().map(|f| f.id).collect())
     };
-    prop_assert_eq!(faces(body)?, faces(a)?, "every face of the box kept by id");
-    let after = mass_properties(&m, body).map_err(fail)?;
+    let box_faces = faces(&m, a)?;
+    prop_assert_eq!(
+        &faces(&m, body)?,
+        &box_faces,
+        "every face of the box kept by id"
+    );
     prop_assert!(close(after.volume, pa.volume, pa.volume));
     prop_assert!(close(after.area, pa.area, pa.area));
     prop_assert!((after.centroid - pa.centroid).norm() <= REL * pa.area.sqrt());
@@ -327,18 +325,19 @@ fn a_tangent_cylinder_leaves_the_box(pair: &TangentPair) -> Result<(), TestCaseE
         Ok(_) => return Err(fail("common(box, cylinder): a touch shares no material")),
         Err(e) => return Err(fail(format!("common(box, cylinder): {e}"))),
     }
-    match fuse(&mut m, a, b) {
-        Err(OpError::Degenerate {
-            reason: Reason::Boolean(BooleanReason::TangentContact),
-            ..
-        }) => {}
-        Ok(_) => {
-            return Err(fail(
-                "fuse(box, cylinder): the face and the wall would share a slit",
-            ));
-        }
-        Err(e) => return Err(fail(format!("fuse(box, cylinder): {e}"))),
-    }
+    let (fused, total) = run(&mut m, "fuse(box, cylinder)", fuse, a, b)?;
+    prop_assert_eq!(m.shells(fused).map_err(fail)?.len(), 2, "two shells");
+    let kept = faces(&m, fused)?;
+    prop_assert!(
+        box_faces.iter().all(|f| kept.contains(f)),
+        "the box's faces are kept by id"
+    );
+    prop_assert!(close(
+        total.volume,
+        pa.volume + pb.volume,
+        pa.volume + pb.volume
+    ));
+    prop_assert!(close(total.area, pa.area + pb.area, pa.area + pb.area));
     prop_assert_eq!(
         dump_text(&m, a).map_err(fail)?,
         before,
@@ -377,7 +376,7 @@ fn a_touch_at_a_box_corner_keeps_its_ids() {
         face: (0, false),
     };
     assert!(touch_at_the_face_rim(&pair), "the exclusion covers it");
-    if let Err(e) = a_tangent_cylinder_leaves_the_box(&pair) {
+    if let Err(e) = check_tangent_box_and_cylinder(&pair) {
         panic!("{e}");
     }
 }
@@ -748,9 +747,9 @@ prop_shards! {
     /// crossing vertex: `fuse` and `common` clean at `Full` with nothing
     /// unchecked and their provenance audited, additive, commuting and
     /// dumping identically in a second run, and the common the Steinmetz
-    /// solid `16R³ / (3 sin ψ)` within `REL + tol·A/V`. Either cut is the designed
-    /// `NonManifold`: the tool is as wide as the target, so the two lumps
-    /// left meet at the crossing vertices (ADR-0006, `boolean/cross-cylinders-cut`).
+    /// solid `16R³ / (3 sin ψ)` within `REL + tol·A/V`. Both cuts are clean
+    /// and audited, preserve the cut volume identity and leave two
+    /// lumps touching at the crossing vertices (ADR-0090).
     crossing_cylinders_obey_every_identity
         [shard_0 shard_1 shard_2 shard_3 shard_4 shard_5 shard_6 shard_7]
         (pair) = prop::body::crossing_pair() => {
@@ -776,19 +775,12 @@ prop_shards! {
                 steinmetz,
                 rel
             );
-            for (name, target, tool) in [("cut(a, b)", a, b), ("cut(b, a)", b, a)] {
-                match cut(&mut m, target, tool) {
-                    Err(OpError::Degenerate {
-                        reason: Reason::Input(InputReason::NonManifold),
-                        ..
-                    }) => {}
-                    Ok(_) => {
-                        return Err(fail(format!(
-                            "{name}: the two lumps meet at the crossing vertices"
-                        )));
-                    }
-                    Err(e) => return Err(fail(format!("{name}: {e}"))),
-                }
+            for (name, target, tool, target_props, tool_props) in
+                [("cut(a, b)", a, b, &pa, &pb), ("cut(b, a)", b, a, &pb, &pa)]
+            {
+                let (body, diff) = run(&mut m, name, cut, target, tool)?;
+                assert_cut_identity(&diff, &inter, target_props, tool_props)?;
+                prop_assert_eq!(lumps(&m, body).map_err(fail)?.len(), 2, "{}", name);
             }
             assert_commutes_with(&mut m, "fuse", fuse, (u, union), a, b)?;
             assert_commutes_with(&mut m, "common", common, (c, inter), a, b)?;

@@ -49,12 +49,20 @@ and the human can read in two minutes: under ~150 lines and ~10 steps.
      run (another runner, a workflow) carries **[CI]** after its grade: it
      needs a push, so the plan's header says it runs on `plan/<slug>`.
    - *Acceptance* is an executable corpus run, ideally the milestone's own:
-     which fixtures, which oracle values, which property tests. A fixture
+     which fixtures, which oracle values, which property tests. A pruning or
+     acceleration step is held equal to its unaccelerated path (`classify`
+     vs `classify_linear`) over samples with loose, unequal tolerances. A fixture
      with no closed form (a walked blend) is held to the second oracle's
      record (ADR-0073), taken before a law is chosen: when it is missing,
      step 1 takes it and no ADR fixes a law before it. A plan that needs
      the second oracle's machine says so in its header, so the human is
      asked when the plan is written, not partway through the run.
+     For changes to hooks, verification or landing, include a scratch-clone
+     case with the real hooks. Assert which SHA was verified and whether
+     `pre-push` accepts it. For landing, cover a rebase whose final amend
+     changes only prose and assert that static checks ran on the final tree.
+     For tooling-only plans, name the affected checks and how to exercise
+     any changed routing (see `/retire-plan`).
    - *Docs to update* is written now, while the deltas are fresh — it is
      what `/retire-plan` executes; `GLOSSARY.md` is on it when a term is
      new. Rustdoc on new public items is part of the steps.
@@ -72,5 +80,8 @@ and the human can read in two minutes: under ~150 lines and ~10 steps.
 8. Reply with the step list and the open questions, then **stop**. The
    human edits the plan before `/work` starts it. The plan links the idea's
    decision (and its ADR) as settled; code and branches wait for `/work`.
+   When the human narrows an implementation request to planning, finish the
+   plan and any explicitly requested planning changes, then stop before the
+   first implementation step.
 
 `$ARGUMENTS`

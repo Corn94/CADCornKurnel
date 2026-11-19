@@ -71,7 +71,7 @@ provenance accounting, and diffs the dump against `dump.txt`. A result
 the oracle recorded no solid for (`degenerate` in `expected.json`) must
 fail with `OpError::Degenerate` at its result step, and one whose recipe
 says `analytic.expect_error` must fail with that typed refusal; either
-ends the run there, nothing later compared, no `dump.txt`. Every op of
+ends the run there, nothing later compared, no `dump.txt`. The refusal is the result step's, or the earlier step `analytic.refuses_at` names (the program stops at the first step that fails, as a consumer's raises); a refusal at any other step fails the fixture, and the lint refuses a `refuses_at` that is no step or has no refusal to place. Every op of
 the recipe grammar has its operation; a fixture that does not pass yet —
 a failure shrunk to one — lives under `regression/<slug>/`, outside the
 lint's areas, with its test `regression_<slug>` `#[ignore = "why"]`d in
@@ -244,21 +244,26 @@ of the step that made the fixture pass, and a later change to it is a
   (ADR-0070); its result is the rest. The lint refuses a comparison against
   such a body: the recipe names the edge Open CASCADE took, or expects
   Arris's refusal with `expect_error`.
-  `expect_error: "tangent-contact" | "non-manifold" | "blend-too-large" |
+  `expect_error: "empty" | "tangent-contact" | "non-manifold" | "blend-too-large" |
   "tangent-chain" | "vertex-blend" | "elliptic-revolve" | "vanishes" |
   "vertex-splits" | "no-exact-offset" | "surface-collapses" | "gap" | "self-intersects" |
   "opening-dragged" | "no-crossing" | "path-corner" | "profile-along-path" |
   "sweep-folds" | "frame-does-not-close" | "loft-too-few-sections" |
-  "loft-loop-count" | "loft-coincident" | "unsupported"` says Open CASCADE
-  builds a result Arris refuses by design (the tangent cases,
+  "loft-loop-count" | "loft-coincident" | "unsupported"` requires Arris
+  to report the named error. `"empty"` requires exactly
+  `BooleanReason::Empty` and holds a common with no material.
+  Other named errors can hold a result Open CASCADE builds and Arris
+  refuses by design (the tangent cases,
   `BooleanReason::TangentContact` — ADR-0004, whose contact Open CASCADE carries
   as an edge of four faces, so where that makes the Euler characteristic
   odd, as in `boolean/tangent-hole`, the oracle records no genus
-  and the recipe states none; `boolean/edge-touching-fuse`, two
-  solids sharing an edge, `InputReason::NonManifold` — ADR-0006, whose
-  compound has an odd Euler characteristic, so the oracle records no
-  genus for it and the recipe states none; a blend it builds and Arris
-  refuses as `BlendReason::TooLarge`, `TangentChain` or `VertexBlend` —
+  and the recipe states none; `boolean/pockets-touching-edge-cut-many`
+  has both material sectors at a shared edge in one lump, refused as
+  `InputReason::NonManifold` under ADR-0090, as is
+  `boolean/edge-touching-exposed-join`, where separate copies from the
+  operand would leave a contact edge exposed within one lump; a blend it
+  builds and Arris refuses as `BlendReason::TooLarge`, `TangentChain` or
+  `VertexBlend` —
   ADR-0007; a revolve of an elliptic profile segment, which it sweeps
   into a surface of revolution with an elliptic meridian and Arris
   refuses as `SweepReason::EllipticRevolve` — ADR-0014; a sweep whose
@@ -302,6 +307,12 @@ of the step that made the fixture pass, and a later change to it is a
   tensor about the centroid at unit density, rows of expressions in
   `expected.json`'s convention (products of inertia negated), checked
   against the oracle's relative to its largest component.
+  `occt_odd_euler: "why"` says Open CASCADE's shape of a result Arris
+  builds has an odd Euler characteristic, a touching ruling carried as an
+  edge of four faces (`boolean/fuse-arc-plate-tangent-inside-cylinder`): the
+  oracle records no genus for it and the lint asks none, `analytic.genus`
+  being Arris's; nor `nurbs_counts`, so its NURBS read-back is held to
+  counts only where `occt_step_counts_differ` does not leave them out.
   `measure_differs: "why"` says Open CASCADE's *measurements* of the
   result are wrong and the closed forms right (ADR-0015): `volume`,
   `area`, `centroid` and `inertia` are then all required and are what
@@ -369,9 +380,22 @@ of the step that made the fixture pass, and a later change to it is a
   conversion, held by a regression fixture of its own.
   `occt_step_unread: "why"` skips both read-backs of Open CASCADE's own
   STEP where reading it measures the reader on a walked blend rather than
-  the operation — minutes of fitting, then a refusal — and names the
-  regression fixture that holds that reading instead; Arris's own STEP is
-  still read back by Open CASCADE and compared. The runner holds a `measure_differs` fixture's
+  the operation — minutes of fitting, then a refusal — or on a quirk of
+  the file (`boolean/fuse-end-disc-tangent-to-wall`: two `VERTEX_POINT`s
+  at one point of one loop), and names the regression fixture that holds
+  that reading instead; Arris's own STEP is
+  still read back by Open CASCADE and compared.
+  `occt_step_counts_differ: "why"` holds Arris's reading of Open
+  CASCADE's own STEP to the checker and the measures but not to the
+  oracle's counts and genus, where the file carries topology the
+  oracle's shape does not (`boolean/fuse-cylinder-tangent-inside`: two
+  `VERTEX_POINT`s at each touch of a crescent's bounds, which Open
+  CASCADE's own reader heals into one). The oracle's self-test still
+  checks shell and solid counts, measures and probes on the round trip.
+  Open CASCADE's reader heals Arris's own STEP of such a crescent into two
+  wires where one loop goes through the touch twice. `compare.py` joins them
+  again before it holds the Euler
+  characteristic even. The runner holds a `measure_differs` fixture's
   read-back to the oracle's own measurements: all but one blame Open
   CASCADE's boolean, whose shape its file carries. `occt_file_measure_differs:
   "why"` (needs `measure_differs`) is that one: Open CASCADE's measurement

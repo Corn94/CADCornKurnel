@@ -498,6 +498,12 @@ impl NurbsCurve2 {
         self.spline.breaks_within(range)
     }
 
+    /// The point at `t` alone: `eval(t).point` bit for bit, without the
+    /// derivatives. Reached through `Curve2::point`.
+    pub(crate) fn point(&self, t: f64) -> Point2 {
+        self.spline.point(t)
+    }
+
     /// The point and its derivatives at `t`.
     pub fn eval(&self, t: f64) -> Curve2Eval {
         let d = self.spline.eval(t);

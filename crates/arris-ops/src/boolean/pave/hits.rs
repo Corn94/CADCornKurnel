@@ -10,7 +10,7 @@ use arris_geom::{
     intersect_surfaces,
 };
 use arris_math::{Point2, Point3, wrap_into};
-use arris_topo::{EdgeId, FaceId, Shape, Vertex as VertexHandle, VertexId};
+use arris_topo::{Edge as EdgeHandle, EdgeId, FaceId, Shape, Vertex as VertexHandle, VertexId};
 
 use super::{
     Build, Candidate, Member, SINGULAR_CLEARANCE, VertexBuild, at_shared_end, components, geometry,
@@ -22,6 +22,15 @@ use crate::boolean::{
 };
 use crate::error::{BooleanReason, Fault, OpError, Reason};
 use crate::pass::pass;
+
+/// How fast [`Build::inside_beside`] steps a curve away from the point
+/// where it touches a boundary: each step this many times the last,
+/// from the tolerance up to the faces' size. The curve leaves the edge to
+/// second order, `κ s² / 2` at a step `s`, so a factor of 4 moves it at
+/// least 16 times as far off the boundary per step and reaches past the
+/// polygons' band within a few steps of where it first could; a ratio,
+/// not a tolerance.
+const TOUCH_STEP_RATIO: f64 = 4.0;
 
 /// A candidate face pair: face `ia` of operand `oa` and face `ib` of
 /// operand `ob`, `oa < ob`.
@@ -109,6 +118,8 @@ impl<'m, 'c> Build<'m, 'c> {
                 }
             }
         }
+        let ends = self.coincident_ends(&found, &coincident)?;
+        found.extend(ends);
         found.sort_by(|x, y| {
             x.0.edge
                 .cmp(&y.0.edge)
@@ -121,6 +132,101 @@ impl<'m, 'c> Build<'m, 'c> {
         }
         self.coincident = coincident;
         Ok(())
+    }
+
+    /// The end vertices of the edges lying in a face of the other operand
+    /// (`coincident`) that a section curve needs as vertices and no hit in
+    /// `found` makes: each as a hit of its edge on that face, at the
+    /// vertex. A vertex of one face of a crossing pair that lies on the
+    /// other face is normally where an edge of the first crosses the
+    /// other, but where those edges only touch it — the rim of a cap a
+    /// wall inside touches a hair off the seam, whose seam lies along that
+    /// wall within the tolerance — none does, and the pair's section curve
+    /// through the vertex would end at a node the cap's loops lack. A
+    /// vertex already hit on the face, one no section curve runs through,
+    /// and one where an edge of the face runs along the curve (a boss's
+    /// rim on a plate, its piece of the boundary) are left as they were,
+    /// so the ids they keep do not change.
+    fn coincident_ends(
+        &self,
+        found: &[(EdgeFaceHit, f64)],
+        coincident: &[(EdgeId, FaceId)],
+    ) -> Result<Vec<(EdgeFaceHit, f64)>, OpError> {
+        let mut out: Vec<(EdgeFaceHit, f64)> = Vec::new();
+        for &(eid, fid) in coincident {
+            let Some(side) = self.operand_of_edge(eid) else {
+                continue;
+            };
+            let Some(other) = self.operand_of_face(fid) else {
+                continue;
+            };
+            let (Some(e), Some(f)) = (
+                self.edge_info(side, eid),
+                self.faces[other].iter().find(|f| f.id == fid),
+            ) else {
+                continue;
+            };
+            let tol = tolerance_of(&self.precision, e.tolerance, f.tolerance);
+            for (k, &(vertex, point, _)) in e.ends.iter().enumerate() {
+                let hit_already = found
+                    .iter()
+                    .chain(&out)
+                    .any(|(h, _)| h.face == fid && h.at_vertex == Some(vertex));
+                if hit_already || !self.section_through(side, vertex, point, f, tol.linear) {
+                    continue;
+                }
+                let t = if k == 0 { e.range.lo() } else { e.range.hi() };
+                let Ok(p) = f.surface.project(point) else {
+                    continue;
+                };
+                if let Some(hit) = self.land(e, f, t, p.uv, point, false)? {
+                    if hit.at_vertex == Some(vertex) {
+                        out.push((hit, tol.linear));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// `true` when a section curve of a crossing pair of `f` and a face
+    /// of operand `side` that has `vertex` on its loops runs through
+    /// `point`, the vertex's, within `linear`, and no edge of that face
+    /// ending there runs along the curve.
+    fn section_through(
+        &self,
+        side: usize,
+        vertex: VertexId,
+        point: Point3,
+        f: &FaceInfo<'m>,
+        linear: f64,
+    ) -> bool {
+        self.pairs.iter().enumerate().any(|(pi, pair)| {
+            let (ia, ib) = self.pair_faces[pi];
+            let g = match pair.operands {
+                [a, b] if a == side && self.faces[b][ib].id == f.id => &self.faces[a][ia],
+                [a, b] if b == side && self.faces[a][ia].id == f.id => &self.faces[b][ib],
+                _ => return false,
+            };
+            let at_vertex: Vec<&EdgeInfo<'m>> = g
+                .edges()
+                .iter()
+                .filter_map(|&id| self.edge_info(side, id))
+                .filter(|e| e.ends.iter().any(|end| end.0 == vertex))
+                .collect();
+            if at_vertex.is_empty() {
+                return false;
+            }
+            meet_curves(&pair.intersection, MeetKind::Crossing).any(|(_, curve)| {
+                let on = curve.project(point).is_ok_and(|on| on.distance <= linear);
+                let along = at_vertex.iter().any(|e| {
+                    curve
+                        .project(e.curve.point(e.range.midpoint()))
+                        .is_ok_and(|on| on.distance <= linear)
+                });
+                on && !along
+            })
+        })
     }
 
     /// The hits of one edge on one face.
@@ -265,7 +371,12 @@ impl<'m, 'c> Build<'m, 'c> {
                     hits
                 };
                 for h in hits {
-                    if h.tangent {
+                    // A touch of the edge and the section curve is a
+                    // vertex of both where the section runs inside both
+                    // faces beside it: a section circle tangent inside a
+                    // cap's rim, whose kept crescent passes through the
+                    // touch. One that runs outside splits nothing.
+                    if h.tangent && !Self::runs_inside(g, f, curve, h.tb, tol.linear) {
                         continue;
                     }
                     let Ok(projection) = f.surface.project(h.point) else {
@@ -287,6 +398,95 @@ impl<'m, 'c> Build<'m, 'c> {
             }
         }
         Ok(found)
+    }
+
+    /// `true` when `curve` runs inside both faces on either side of its
+    /// point at `t`, where it touches an edge of `g`: a section curve,
+    /// over its whole domain ([`Self::inside_beside`]).
+    fn runs_inside(g: &FaceInfo<'m>, f: &FaceInfo<'m>, curve: &Curve, t: f64, linear: f64) -> bool {
+        let domain = curve.domain();
+        let periodic = curve.period().is_some();
+        Self::inside_beside(&[g, f], curve, t, linear, |at| {
+            (periodic || domain.contains(at)).then_some(at)
+        })
+    }
+
+    /// `true` when the effective normals of `f` and `g`, two faces of a
+    /// `Coincident` pair, point opposite ways at `point`: the solids lie
+    /// on the two sides of their shared plane.
+    fn facing_apart(f: &FaceInfo<'m>, g: &FaceInfo<'m>, point: Point3) -> bool {
+        let normal = |face: &FaceInfo<'m>| {
+            let uv = face.surface.project(point).ok()?.uv;
+            let n = face.surface.normal(uv.x, uv.y)?.into_inner();
+            Some(if face.orientation.is_reversed() {
+                -n
+            } else {
+                n
+            })
+        };
+        matches!((normal(f), normal(g)), (Some(a), Some(b)) if a.dot(&b) < 0.0)
+    }
+
+    /// `true` when edge `e` runs inside `other` on either side of its
+    /// point at `t`, where it touches an edge of `other`'s, the two faces
+    /// on one surface: a rim tangent inside a bar's end edge on the face
+    /// the rim's disc lies on, whose pieces either side of the touch
+    /// bound what is left of that face there ([`Self::inside_beside`]).
+    fn edge_runs_inside(e: &EdgeInfo<'m>, t: f64, other: &FaceInfo<'m>, linear: f64) -> bool {
+        Self::inside_beside(&[other], e.curve, t, linear, |at| e.in_range(at))
+    }
+
+    /// `true` when `curve` runs inside every face of `faces` on either
+    /// side of its point at `t`, where it touches a boundary. The touch
+    /// is a double root: the curve leaves the boundary only to second
+    /// order, so within a few tolerances of the point the faces' polygons
+    /// put it on their boundary. It is stepped away along its tangent at
+    /// distances growing from `linear` by [`TOUCH_STEP_RATIO`] up to the
+    /// faces' size, while `within` keeps the parameter on the curve's
+    /// stretch, and on each side the first point that is not on a
+    /// boundary decides: inside every face, or outside one and that side
+    /// does not count. The nearest decisive point is the local one, which
+    /// a face that is not convex cannot mislead.
+    fn inside_beside(
+        faces: &[&FaceInfo<'m>],
+        curve: &Curve,
+        t: f64,
+        linear: f64,
+        within: impl Fn(f64) -> Option<f64>,
+    ) -> bool {
+        let speed = curve.eval(t).d1.norm();
+        if speed == 0.0 {
+            return false;
+        }
+        let reach = faces
+            .iter()
+            .map(|f| f.bounds.diagonal())
+            .fold(0.0, f64::max);
+        [-1.0, 1.0].into_iter().any(|sign| {
+            let mut step = linear;
+            while step <= reach {
+                step *= TOUCH_STEP_RATIO;
+                let Some(at) = within(t + sign * step / speed) else {
+                    return false;
+                };
+                let point = curve.point(at);
+                let mut inside = true;
+                for face in faces {
+                    let Ok(projection) = face.surface.project(point) else {
+                        return false;
+                    };
+                    match face.domain.side(projection.uv).0 {
+                        Side::Outside => return false,
+                        Side::Boundary => inside = false,
+                        Side::Inside => {}
+                    }
+                }
+                if inside {
+                    return true;
+                }
+            }
+            false
+        })
     }
 
     /// The edges of the two faces of every `Coincident` pair against one
@@ -347,6 +547,21 @@ impl<'m, 'c> Build<'m, 'c> {
                         if seen {
                             continue;
                         }
+                        // A touch where either edge runs inside the other
+                        // face beside it is a vertex of both, as a section
+                        // touching a rim from inside is: a boss's rim
+                        // tangent inside a bar's end edge, the face's piece
+                        // between them pinched to that point.
+                        //
+                        // Two faces on opposite sides of one plane (a
+                        // frustum's cap and the box standing on it) share no
+                        // area, so a touch there is the two solids touching
+                        // at a point, from outside both faces: a vertex of
+                        // both too, which the result names `NonManifold`.
+                        let tangent = h.tangent
+                            && !Self::edge_runs_inside(ea, ta, fb, tol.linear)
+                            && !Self::edge_runs_inside(eb, tb, fa, tol.linear)
+                            && !Self::facing_apart(fa, fb, point);
                         found.push((
                             EdgeEdgeHit {
                                 pair: pi,
@@ -355,7 +570,7 @@ impl<'m, 'c> Build<'m, 'c> {
                                 b: eb.id,
                                 tb,
                                 point,
-                                tangent: h.tangent,
+                                tangent,
                                 vertex: None,
                             },
                             tol.linear,
@@ -593,6 +808,66 @@ impl<'m, 'c> Build<'m, 'c> {
         Ok(out)
     }
 
+    /// Hits at the ends of a contact whose adjacent coincident faces'
+    /// rims touch from outside and whose walls only touch. A rim's hit
+    /// on the other wall and a seam's hit on the other cap locate the
+    /// contact, but the tangent edge–edge
+    /// verdict says that neither cap is split there. In particular, the
+    /// seam can pierce the other cap's plane at its own vertex even though
+    /// the two rims only touch. Keep those hits out of the vertex merge.
+    fn contact_end_hits(&self) -> BTreeSet<usize> {
+        let mut end_hits = BTreeSet::new();
+        for (i, rim_hit) in self.crossings.iter().enumerate().filter(|(_, x)| x.tangent) {
+            let caps = &self.pairs[rim_hit.pair];
+            let [a, b] = caps.operands;
+            let (Some(rim_a), Some(rim_b)) =
+                (self.edge_info(a, rim_hit.a), self.edge_info(b, rim_hit.b))
+            else {
+                continue;
+            };
+            let point = rim_hit.point;
+            let linear = self.crossing_tolerance[i];
+            for (pi, pair) in self.pairs.iter().enumerate() {
+                if pair.operands != [a, b]
+                    || pair
+                        .intersection
+                        .curves()
+                        .iter()
+                        .any(|c| c.kind == MeetKind::Crossing)
+                    || !meet_curves(&pair.intersection, MeetKind::Touch)
+                        .any(|(_, c)| c.project(point).is_ok_and(|p| p.distance <= linear))
+                {
+                    continue;
+                }
+                let (wall_a, wall_b) = self.pair_infos(pi);
+                if !wall_a.edges().contains(&rim_a.id) || !wall_b.edges().contains(&rim_b.id) {
+                    continue;
+                }
+                for (rim, wall, other_wall, other_cap) in [
+                    (rim_a, wall_a, wall_b, caps.b),
+                    (rim_b, wall_b, wall_a, caps.a),
+                ] {
+                    let rim_vertex = rim.vertex_at(point);
+                    for (j, h) in self.hits.iter().enumerate() {
+                        let rim_touches_wall =
+                            h.tangent && h.edge == rim.id && h.face == other_wall.id;
+                        let seam_reaches_cap = h.face == other_cap
+                            && rim_vertex.is_some()
+                            && h.at_vertex == rim_vertex
+                            && wall.uses.iter().filter(|(edge, _)| *edge == h.edge).count() == 2
+                            && self.coincident.contains(&(h.edge, other_wall.id));
+                        if (rim_touches_wall || seam_reaches_cap)
+                            && (h.point - point).norm() <= linear.max(self.hit_tolerance[j])
+                        {
+                            end_hits.insert(j);
+                        }
+                    }
+                }
+            }
+        }
+        end_hits
+    }
+
     /// Hits, then crossings, then section crossings, then the singular
     /// vertices a crossing curve runs through, as candidate points; the
     /// section vertices are their components under "the same within a
@@ -604,9 +879,10 @@ impl<'m, 'c> Build<'m, 'c> {
     /// is numbered by its first member in that order and carries that
     /// member's source.
     pub(super) fn merge(&mut self) -> Result<(), OpError> {
+        let contact_ends = self.contact_end_hits();
         let mut members: Vec<(Member, Candidate)> = Vec::new();
         for (i, h) in self.hits.iter().enumerate() {
-            if h.tangent {
+            if h.tangent || contact_ends.contains(&i) {
                 continue;
             }
             let mut existing: Vec<VertexId> = Vec::new();
@@ -697,7 +973,7 @@ impl<'m, 'c> Build<'m, 'c> {
             .hits
             .iter()
             .enumerate()
-            .filter(|(_, h)| h.tangent)
+            .filter(|(i, h)| h.tangent && !contact_ends.contains(i))
             .map(|(i, h)| {
                 (
                     Member::Hit(i),
@@ -1053,11 +1329,16 @@ impl<'m, 'c> Build<'m, 'c> {
 
     /// The paves on the operand edges: each hit's vertex at its `t`,
     /// unless the hit is at the edge's own end or merged into the vertex
-    /// that holds it; each crossing's vertex
+    /// that holds it, and on the face's edge it landed on, if any, at the
+    /// projection; each crossing's vertex
     /// on both edges likewise; one pave per vertex per edge, ascending
     /// by `t`.
     pub(super) fn pave_edges(&mut self) {
         let mut wanted: Vec<(EdgeId, f64, usize)> = Vec::new();
+        // Paves at a landing, after every other: where the face's edge
+        // makes the vertex with a hit or crossing of its own, its own
+        // parameter stands.
+        let mut landings: Vec<(EdgeId, f64, usize)> = Vec::new();
         for h in &self.hits {
             let (Some(vertex), None) = (h.vertex, h.at_vertex) else {
                 continue;
@@ -1075,6 +1356,30 @@ impl<'m, 'c> Build<'m, 'c> {
                 });
             if !at_end {
                 wanted.push((h.edge, h.t, vertex));
+            }
+            // A hit landing on an edge of the face paves that edge as
+            // well: the edge's own hits on the other operand make the
+            // vertex there too, except where the edge only touches that
+            // operand's face — a cap's rim tangent inside a wall whose
+            // seam crosses the cap beside the touch, within the rim's
+            // tolerance (`boolean/fuse-cylinder-tangent-inside-near-seam`).
+            let landed = match h.landing {
+                Landing::Boundary(shape) => EdgeHandle::try_from(shape).ok(),
+                Landing::Interior => None,
+            };
+            let Some(g) = landed.and_then(|g| {
+                self.operand_of_edge(g.id)
+                    .and_then(|side| self.edge_info(side, g.id))
+            }) else {
+                continue;
+            };
+            let at_its_end = g.vertex_at(h.point).is_some()
+                || g.ends
+                    .iter()
+                    .any(|end| self.vertices[vertex].existing.contains(&end.0));
+            let t = g.curve.project(h.point).ok().and_then(|p| g.in_range(p.t));
+            if let (false, Some(t)) = (at_its_end, t) {
+                landings.push((g.id, t, vertex));
             }
         }
         for x in &self.crossings {
@@ -1098,6 +1403,7 @@ impl<'m, 'c> Build<'m, 'c> {
                 }
             }
         }
+        wanted.extend(landings);
         for (edge, t, vertex) in wanted {
             let list = self.paves.entry(edge).or_default();
             if list.iter().all(|p| p.vertex != vertex) {
