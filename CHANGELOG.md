@@ -73,8 +73,21 @@ into its version (ADR-0027).
   face that then pass through one vertex (a hole tangent to a plate's
   edge) are joined into one loop through it twice. Such solids were
   refused as open loops. A read with `Heal::Off` refuses them, as before.
-- **Breaking**: `Healing` has the fields `pinched` and `welded`. Fix: a
-  `Healing` literal adds `pinched: Vec::new(), welded: Vec::new()`.
+- A sliver face — one loop of two straight edges between the same two
+  vertices, the same segment twice, of no area — is dropped by a healing
+  read, the faces either side meeting at the one edge, and named in
+  `Healing::slivers` (new). Autodesk exports leave them where they closed
+  a gap; such solids failed the checker once their gaps healed.
+- `ReadOptions::heal_ceiling` (new): the largest gap a healing read heals,
+  as a fraction of the part's size; `None`, the default, is
+  `HEAL_GAP_FRACTION` (`5e-4`) as before. `LOOSE_HEAL_GAP_FRACTION`
+  (new, `5e-3`) reads Autodesk Inventor simulation exports, whose gaps
+  reach `2.2e-3` of a part. `ReadOptions::ceiling` (new) is the one used.
+- **Breaking**: `Healing` has the fields `pinched`, `welded` and
+  `slivers`, and `ReadOptions` the field `heal_ceiling`. Fix: a `Healing`
+  literal adds `pinched: Vec::new(), welded: Vec::new(), slivers:
+  Vec::new()`; a `ReadOptions { .. }` literal ends in
+  `..ReadOptions::default()`.
 
 ## 0.11.1 — 2026-11-16
 

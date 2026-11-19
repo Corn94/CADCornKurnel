@@ -116,7 +116,7 @@ use arris_topo::{Body, CurveId, Model, Orientation, Provenance};
 mod build;
 
 use super::entities::{Args, describe, malformed};
-use super::geometry::{Ball, Geometry, ReadCurve, ReadSurface};
+use super::geometry::{Ball, CurveForm, Geometry, ReadCurve, ReadSurface};
 use super::{FAST_FIT_FACTOR, Heal, Healing, ReadCheck, Refusal};
 
 /// A solid read: its body and the record naming the file entity each of
@@ -272,6 +272,103 @@ fn join_loops(ends: &[(usize, usize)], bounds: &mut Vec<Bound>) {
         }
         return;
     }
+}
+
+/// Drops from `file` every face whose one loop is two straight edges
+/// between the same two vertices — the same segment twice, a face of no
+/// area, as an exporter leaves where it closed a gap — and puts the first
+/// edge in the second's place in the face across it, so the two faces
+/// either side meet at one edge. Nothing moves: the two edges are one
+/// segment. Returns the dropped faces' file `#id`s, ascending.
+fn drop_line_slivers(file: &mut FileSolid) -> Vec<u64> {
+    let is_line = |e: usize| {
+        matches!(
+            file.edges[e].curve.form,
+            CurveForm::Exact(arris_geom::Curve::Line { .. })
+        )
+    };
+    let ends = |e: usize| {
+        let edge = &file.edges[e];
+        (edge.start.min(edge.end), edge.start.max(edge.end))
+    };
+    let mut dropped = Vec::new();
+    // The second edge of each sliver, by the first.
+    let mut into: BTreeMap<usize, usize> = BTreeMap::new();
+    for shell in &mut file.shells {
+        shell.faces.retain(|face| {
+            let [bound] = face.bounds.as_slice() else {
+                return true;
+            };
+            let Walk::Edges(steps) = &bound.walk else {
+                return true;
+            };
+            let [a, b] = steps.as_slice() else {
+                return true;
+            };
+            let (a, b) = (a.edge, b.edge);
+            let (lo, hi) = ends(a);
+            if a == b || lo == hi || ends(b) != (lo, hi) || !is_line(a) || !is_line(b) {
+                return true;
+            }
+            if into.contains_key(&a) || into.contains_key(&b) {
+                return true;
+            }
+            into.insert(b, a);
+            dropped.push(face.id);
+            false
+        });
+    }
+    if into.is_empty() {
+        return dropped;
+    }
+    let edges = &file.edges;
+    for shell in &mut file.shells {
+        for face in &mut shell.faces {
+            for bound in &mut face.bounds {
+                let Walk::Edges(steps) = &mut bound.walk else {
+                    continue;
+                };
+                for step in steps {
+                    let Some(&a) = into.get(&step.edge) else {
+                        continue;
+                    };
+                    let b = &edges[step.edge];
+                    let tail = if step.forward { b.start } else { b.end };
+                    *step = Step {
+                        edge: a,
+                        forward: edges[a].start == tail,
+                    };
+                }
+            }
+        }
+    }
+    // The second edges, unused now, leave the list.
+    let mut index = vec![usize::MAX; file.edges.len()];
+    let mut kept = 0;
+    for (i, slot) in index.iter_mut().enumerate() {
+        if !into.contains_key(&i) {
+            *slot = kept;
+            kept += 1;
+        }
+    }
+    let mut i = 0;
+    file.edges.retain(|_| {
+        i += 1;
+        !into.contains_key(&(i - 1))
+    });
+    for shell in &mut file.shells {
+        for face in &mut shell.faces {
+            for bound in &mut face.bounds {
+                if let Walk::Edges(steps) = &mut bound.walk {
+                    for step in steps {
+                        step.edge = index[step.edge];
+                    }
+                }
+            }
+        }
+    }
+    dropped.sort_unstable();
+    dropped
 }
 
 /// Splits every vertex of `file` whose link in a shell is two or more
@@ -536,6 +633,7 @@ impl Geometry<'_> {
         solid: u64,
         instance: u32,
         heal: Heal,
+        ceiling: f64,
         check: ReadCheck,
         meter: &mut Meter<'_>,
     ) -> Result<Solid, Halt> {
@@ -545,18 +643,19 @@ impl Geometry<'_> {
         // and then splits a vertex where separate parts of a shell touch,
         // one per fan. A read that does not heal leaves both, and the
         // builder refuses the shell: an open loop, or not a closed surface.
-        let (welded, pinched) = match heal {
+        let (welded, pinched, slivers) = match heal {
             Heal::GapsAndOrientation => {
                 let welded =
                     self.weld_coincident(&mut file, model.precision().default_tolerance)?;
                 join_touching_loops(&mut file);
+                let slivers = drop_line_slivers(&mut file);
                 let pinched = match file.kind {
                     BodyKind::Solid => unpinch(&mut file),
                     _ => Vec::new(),
                 };
-                (welded, pinched)
+                (welded, pinched, slivers)
             }
-            Heal::Off => (Vec::new(), Vec::new()),
+            Heal::Off => (Vec::new(), Vec::new(), Vec::new()),
         };
         // A solid's voids are checked once built: a void shell encloses
         // negative volume. One that encloses positive volume was written
@@ -570,7 +669,7 @@ impl Geometry<'_> {
             let first = inside_out.is_empty();
             let mut found: Vec<usize> = Vec::new();
             let attempt = model.transaction(|m| {
-                let built = self.build(m, solid, instance, heal, check, &file, meter);
+                let built = self.build(m, solid, instance, heal, ceiling, check, &file, meter);
                 if let Some(stop) = meter.stopped() {
                     return Err(Attempt::Halt(Halt::Interrupted(stop)));
                 }
@@ -607,6 +706,7 @@ impl Geometry<'_> {
                 Ok(mut built) => {
                     built.healing.pinched = pinched;
                     built.healing.welded = welded;
+                    built.healing.slivers = slivers;
                     return Ok(built);
                 }
                 Err(Attempt::Halt(halt)) => return Err(halt),

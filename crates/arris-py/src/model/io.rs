@@ -89,6 +89,7 @@ impl Model {
             } else {
                 arris::io::step::Heal::Off
             },
+            ..arris::io::step::ReadOptions::default()
         };
         let limits = Limits::new(cancel, budget);
         let read = self.run_with(

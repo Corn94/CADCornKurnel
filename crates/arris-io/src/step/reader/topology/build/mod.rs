@@ -59,6 +59,9 @@ struct Build<'a, 'm> {
     /// A [`ReadCheck::Fast`] read: looser pcurve fits, gaps at the
     /// checker's samples.
     fast: bool,
+    /// The healing ceiling, a fraction of the part's size
+    /// ([`ReadOptions::heal_ceiling`](crate::step::ReadOptions::heal_ceiling)).
+    ceiling: f64,
     precision: Precision,
     tol: Tolerance,
     /// The model's default tolerance.
@@ -95,12 +98,14 @@ impl Geometry<'_> {
         solid: u64,
         instance: u32,
         heal: Heal,
+        ceiling: f64,
         check: ReadCheck,
         file: &FileSolid,
         meter: &mut Meter<'_>,
     ) -> Result<Solid, Refusal> {
         let mut build = Build::new(self, model, solid, instance, heal, file, meter)?;
         build.fast = check == ReadCheck::Fast;
+        build.ceiling = ceiling;
         build.edges()?;
         build.split_at_singular_points()?;
         let mut walked = build.walk_shells()?;
@@ -148,6 +153,7 @@ impl<'a, 'm> Build<'a, 'm> {
             instance,
             heal,
             fast: false,
+            ceiling: HEAL_GAP_FRACTION,
             precision,
             tol: precision.tolerance(),
             tolerance,
@@ -243,9 +249,7 @@ impl<'a, 'm> Build<'a, 'm> {
             .max(self.tolerance);
         self.cap = match self.heal {
             Heal::Off => self.read_cap,
-            Heal::GapsAndOrientation => {
-                (HEAL_GAP_FRACTION * 2.0 * self.part.radius).max(self.read_cap)
-            }
+            Heal::GapsAndOrientation => (self.ceiling * 2.0 * self.part.radius).max(self.read_cap),
         };
         Ok(())
     }

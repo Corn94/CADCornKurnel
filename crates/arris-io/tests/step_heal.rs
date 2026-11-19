@@ -116,6 +116,36 @@ fn a_gap_past_the_healing_ceiling_is_refused_naming_the_ceiling() {
     assert!(gap >= delta * (1.0 - 1e-9), "{gap}");
 }
 
+#[test]
+fn a_raised_ceiling_heals_a_gap_past_the_default_one() {
+    let heal_cap = HEAL_GAP_FRACTION * size(4.0, 12.0);
+    let delta = 2.0 * heal_cap;
+    let text = moved(4.0, 12.0, delta);
+    let mut m = Model::default();
+    let options = ReadOptions {
+        heal_ceiling: Some(step::LOOSE_HEAL_GAP_FRACTION),
+        ..ReadOptions::default()
+    };
+    let read = step_read(&mut m, &text, &options).unwrap();
+    let back = read.solids[0]
+        .result
+        .clone()
+        .unwrap_or_else(|r| panic!("{r}"));
+    let report = check(&m, back.body, Level::Full);
+    assert!(report.is_ok() && report.unchecked().is_empty(), "{report}");
+    let loose = step::LOOSE_HEAL_GAP_FRACTION * size(4.0, 12.0 + delta);
+    let grown = &back.healing.grown;
+    assert!(
+        grown
+            .iter()
+            .any(|g| g.file == 59 && g.gap >= delta * (1.0 - 1e-9)),
+        "{grown:?}"
+    );
+    assert!(grown.iter().all(|g| g.gap <= loose), "{grown:?}");
+    assert_eq!(options.ceiling(), step::LOOSE_HEAL_GAP_FRACTION);
+    assert_eq!(ReadOptions::default().ceiling(), HEAL_GAP_FRACTION);
+}
+
 /// A file whose gaps are within the read cap reads to the same body
 /// healing or not, with an empty record.
 #[test]

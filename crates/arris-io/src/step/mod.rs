@@ -66,8 +66,9 @@ mod reader;
 
 pub use assembly::{TreeError, write_products, write_products_with};
 pub use reader::{
-    FAST_FIT_FACTOR, FaceColour, Grown, Heal, Healing, LengthUnit, Occurrence, ProductTree, Read,
-    ReadBody, ReadCheck, ReadError, ReadOptions, ReadSolid, Refusal, RefusalKind, Rgb, read,
+    FAST_FIT_FACTOR, FaceColour, Grown, Heal, Healing, LOOSE_HEAL_GAP_FRACTION, LengthUnit,
+    Occurrence, ProductTree, Read, ReadBody, ReadCheck, ReadError, ReadOptions, ReadSolid, Refusal,
+    RefusalKind, Rgb, read,
 };
 
 use core::fmt::Write as _;

@@ -62,6 +62,14 @@ pub struct ReadOptions {
     /// the `#id` of their file entity (a `MANIFOLD_SOLID_BREP`, say): a
     /// part to read fast in an assembly read in full, or the reverse.
     pub check_for: BTreeMap<u64, ReadCheck>,
+    /// The largest gap a healing read heals, as a fraction of the part's
+    /// size: `arris_math::HEAL_GAP_FRACTION` (`5e-4`) where `None`, the
+    /// default. A file whose exporter left gaps past it — Inventor
+    /// simulation exports leave up to `2.2e-3` — is refused with
+    /// [`Refusal::Gap`] unless the caller raises it, to
+    /// [`LOOSE_HEAL_GAP_FRACTION`] say. What a read grows is named in
+    /// [`Healing::grown`] either way.
+    pub heal_ceiling: Option<f64>,
 }
 
 impl ReadOptions {
@@ -70,6 +78,12 @@ impl ReadOptions {
     /// [`check`](ReadOptions::check).
     pub fn check_of(&self, solid: u64) -> ReadCheck {
         self.check_for.get(&solid).copied().unwrap_or(self.check)
+    }
+
+    /// The healing ceiling a read uses: [`heal_ceiling`](ReadOptions::heal_ceiling),
+    /// else `arris_math::HEAL_GAP_FRACTION`.
+    pub fn ceiling(&self) -> f64 {
+        self.heal_ceiling.unwrap_or(arris_math::HEAL_GAP_FRACTION)
     }
 }
 
@@ -106,6 +120,15 @@ pub enum ReadCheck {
 /// The factor a [`ReadCheck::Fast`] read fits pcurves to, over the model's
 /// default tolerance: `1e-4` of a length unit at Arris's `1e-7`.
 pub const FAST_FIT_FACTOR: f64 = 1000.0;
+
+/// A healing ceiling, as a fraction of the part's size, for files whose
+/// exporter left gaps past `arris_math::HEAL_GAP_FRACTION`
+/// ([`ReadOptions::heal_ceiling`]): `5e-3`, `2.3×` the largest gap seen in
+/// Autodesk Inventor simulation exports (`2.2e-3` of a small part's size),
+/// and ten times the default. Gaps that large are the exporter's
+/// tolerance, which the read carries as the entities' tolerances, not
+/// moved geometry; a boolean on such a body works to those tolerances.
+pub const LOOSE_HEAL_GAP_FRACTION: f64 = 5e-3;
 
 /// What the reader heals (ADR-0058). Healing never moves geometry and
 /// never heals silently: what it did is the [`ReadBody::healing`] record.
@@ -160,6 +183,10 @@ pub struct Healing {
     /// with a vertex for each edge. Nothing moved; the loop closes. Two
     /// loops of one face that then touch at a vertex are joined into one.
     pub welded: Vec<u64>,
+    /// Every face (its file `#id`) dropped as a sliver: one loop of two
+    /// straight edges between the same two vertices, the same segment
+    /// twice, of no area. The faces either side meet at the one edge.
+    pub slivers: Vec<u64>,
 }
 
 impl Healing {
@@ -175,6 +202,7 @@ impl Healing {
             && self.turned.is_empty()
             && self.pinched.is_empty()
             && self.welded.is_empty()
+            && self.slivers.is_empty()
     }
 }
 
@@ -801,7 +829,15 @@ fn read_solid(
     meter: &mut Meter<'_>,
 ) -> Result<(topology::Solid, ReadCheck), Halt> {
     let check = options.check_of(p.solid);
-    let first = geometry.solid(model, p.solid, p.instance, options.heal, check, meter);
+    let first = geometry.solid(
+        model,
+        p.solid,
+        p.instance,
+        options.heal,
+        options.ceiling(),
+        check,
+        meter,
+    );
     match (first, check) {
         // A gap past the cap is the file's: the full read measures every
         // point the fast one does and more, so it would refuse it too.
@@ -814,6 +850,7 @@ fn read_solid(
                 p.solid,
                 p.instance,
                 options.heal,
+                options.ceiling(),
                 ReadCheck::Full,
                 meter,
             )
@@ -910,6 +947,7 @@ fn imported(
             .collect(),
         pinched: built.healing.pinched,
         welded: built.healing.welded,
+        slivers: built.healing.slivers,
     };
     Ok((
         topology::Solid {

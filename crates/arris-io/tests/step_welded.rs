@@ -9,6 +9,9 @@
 //!
 //! Either way the loop cannot close. A healing read welds the two and
 //! names the one welded away; a read that does not heal refuses the solid.
+//!
+//! Also a sliver face, one loop of the same segment twice, in
+//! `tests/data/sliver`: dropped by a healing read.
 
 use arris_check::{Level, check};
 use arris_debug::unmetered::{mass_properties, step_read};
@@ -17,7 +20,10 @@ use arris_topo::Model;
 use core::f64::consts::PI;
 
 const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/welded");
-const CASES: [&str; 2] = ["closed_edge_two_vertices.step", "junction_two_vertices.step"];
+const CASES: [&str; 2] = [
+    "closed_edge_two_vertices.step",
+    "junction_two_vertices.step",
+];
 
 fn read_one(name: &str, heal: Heal) -> (Model, Result<arris_io::step::ReadBody, Refusal>) {
     let text = std::fs::read_to_string(format!("{DATA}/{name}")).unwrap();
@@ -47,6 +53,38 @@ fn a_vertex_written_twice_at_one_point_is_welded_when_healing() {
         let report = check(&m, read.body, Level::Full);
         assert!(report.is_ok(), "{name}: {report:?}");
     }
+}
+
+#[test]
+fn a_sliver_face_of_one_segment_twice_is_dropped_when_healing() {
+    // A 10 cube one of whose edges is doubled, a plane face between the
+    // edge and its copy (`kernel-lab/tools/make_sliver_case.py`).
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/sliver/sliver_cube.step"
+    ))
+    .unwrap();
+    let mut m = Model::default();
+    let read = step_read(&mut m, &text, &ReadOptions::default()).unwrap();
+    let back = read.solids[0]
+        .result
+        .clone()
+        .unwrap_or_else(|r| panic!("{r}"));
+    let v = mass_properties(&m, back.body).unwrap().volume;
+    assert!((v - 1000.0).abs() < 1e-9, "volume {v}");
+    assert_eq!(back.healing.slivers.len(), 1);
+    assert_eq!(m.faces(back.body).unwrap().len(), 6);
+    assert_eq!(m.edges(back.body).unwrap().len(), 12);
+    let report = check(&m, back.body, Level::Full);
+    assert!(report.is_ok(), "{report:?}");
+
+    let mut m = Model::default();
+    let off = ReadOptions {
+        heal: Heal::Off,
+        ..ReadOptions::default()
+    };
+    let read = step_read(&mut m, &text, &off).unwrap();
+    assert!(read.solids[0].result.is_err());
 }
 
 #[test]
