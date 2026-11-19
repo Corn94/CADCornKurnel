@@ -38,7 +38,10 @@ fn a_fast_read_passes_the_checker_and_measures_as_the_full_one() {
             mass_properties(&sm, s.body).unwrap().volume,
         );
         assert!((vf - vs).abs() <= 1e-6 * vs, "fast {vf} against full {vs}");
-        assert_eq!(fm.faces(f.body).unwrap().len(), sm.faces(s.body).unwrap().len());
+        assert_eq!(
+            fm.faces(f.body).unwrap().len(),
+            sm.faces(s.body).unwrap().len()
+        );
     }
 }
 
@@ -50,7 +53,10 @@ fn a_solid_can_be_read_otherwise_than_the_rest() {
     let mut fast_one = ReadOptions::default();
     fast_one.check_for.insert(solid, ReadCheck::Fast);
     let (_, read_fast) = read(&fast_one);
-    assert_eq!(read_fast.solids[0].result.as_ref().unwrap().check, ReadCheck::Fast);
+    assert_eq!(
+        read_fast.solids[0].result.as_ref().unwrap().check,
+        ReadCheck::Fast
+    );
 
     let mut full_one = ReadOptions {
         check: ReadCheck::Fast,
@@ -58,7 +64,10 @@ fn a_solid_can_be_read_otherwise_than_the_rest() {
     };
     full_one.check_for.insert(solid, ReadCheck::Full);
     let (_, read_full) = read(&full_one);
-    assert_eq!(read_full.solids[0].result.as_ref().unwrap().check, ReadCheck::Full);
+    assert_eq!(
+        read_full.solids[0].result.as_ref().unwrap().check,
+        ReadCheck::Full
+    );
 }
 
 #[test]

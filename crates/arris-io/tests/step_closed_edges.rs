@@ -42,12 +42,17 @@ fn a_closed_bspline_edge_whose_vertex_is_off_the_seam_reads_as_the_whole_loop() 
     for name in ["closed_bspline_37.step", "closed_bspline_90.step"] {
         for heal in [Heal::Off, Heal::GapsAndOrientation] {
             let (m, result) = read_one(name, heal);
-            let body = result.unwrap_or_else(|r| panic!("{name} {heal:?}: refused: {r}")).body;
+            let body = result
+                .unwrap_or_else(|r| panic!("{name} {heal:?}: refused: {r}"))
+                .body;
             assert!(check(&m, body, Level::Full).is_ok(), "{name}");
             assert_eq!(m.faces(body).unwrap().len(), 3, "{name}");
             assert_eq!(m.edges(body).unwrap().len(), 3, "{name}");
             let v = mass_properties(&m, body).unwrap().volume;
-            assert!((v - exact).abs() < 1e-12 * exact, "{name}: {v} against {exact}");
+            assert!(
+                (v - exact).abs() < 1e-12 * exact,
+                "{name}: {v} against {exact}"
+            );
         }
     }
 }
@@ -58,7 +63,10 @@ fn a_void_written_inside_out_is_turned_and_named_when_healing() {
     let read = result.unwrap();
     assert!(check(&m, read.body, Level::Full).is_ok());
     let v = mass_properties(&m, read.body).unwrap().volume;
-    assert!((v - 936.0).abs() < 1e-9, "{v}: the void's 64 taken from 1000");
+    assert!(
+        (v - 936.0).abs() < 1e-9,
+        "{v}: the void's 64 taken from 1000"
+    );
     assert_eq!(read.healing.turned.len(), 6, "the void's six faces named");
 }
 

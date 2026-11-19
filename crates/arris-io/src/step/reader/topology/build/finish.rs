@@ -47,6 +47,7 @@ impl Build<'_, '_> {
                     })
                     .collect(),
                 pinched: Vec::new(),
+                welded: Vec::new(),
             },
         })
     }

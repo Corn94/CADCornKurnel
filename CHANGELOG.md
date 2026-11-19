@@ -65,8 +65,16 @@ into its version (ADR-0027).
   in `Healing::pinched` (new). The fans are found from the loops' corners.
   A read with `Heal::Off` refuses the shell, as before, as not a closed
   surface. Such solids were refused as non-manifold.
-- **Breaking**: `Healing` has the field `pinched`. Fix: a `Healing`
-  literal adds `pinched: Vec::new()`.
+- A vertex written as two `VERTEX_POINT`s at one point — a closed edge
+  (a hole's rim) whose end is a second vertex at its start, or a loop
+  junction whose edges end and start at different vertices at one point,
+  as Inventor and SOLIDWORKS write them — is welded by a healing read and
+  the vertex welded away named in `Healing::welded` (new). Two loops of a
+  face that then pass through one vertex (a hole tangent to a plate's
+  edge) are joined into one loop through it twice. Such solids were
+  refused as open loops. A read with `Heal::Off` refuses them, as before.
+- **Breaking**: `Healing` has the fields `pinched` and `welded`. Fix: a
+  `Healing` literal adds `pinched: Vec::new(), welded: Vec::new()`.
 
 ## 0.11.1 — 2026-11-16
 

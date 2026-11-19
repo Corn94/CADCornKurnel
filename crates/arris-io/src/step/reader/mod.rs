@@ -153,6 +153,13 @@ pub struct Healing {
     /// all at the file's point: what a weldment's members touching at a
     /// corner export as. Nothing moved; the shell becomes a manifold one.
     pub pinched: Vec<u64>,
+    /// Every `VERTEX_POINT` (its file `#id`) welded into another at the
+    /// same point that the topology says is the same vertex: the second
+    /// vertex of an edge that starts and ends at one point (a closed edge
+    /// written with a vertex at each end), or of a loop junction written
+    /// with a vertex for each edge. Nothing moved; the loop closes. Two
+    /// loops of one face that then touch at a vertex are joined into one.
+    pub welded: Vec<u64>,
 }
 
 impl Healing {
@@ -164,7 +171,10 @@ impl Healing {
     /// assert!(Healing::default().is_empty());
     /// ```
     pub fn is_empty(&self) -> bool {
-        self.grown.is_empty() && self.turned.is_empty() && self.pinched.is_empty()
+        self.grown.is_empty()
+            && self.turned.is_empty()
+            && self.pinched.is_empty()
+            && self.welded.is_empty()
     }
 }
 
@@ -799,7 +809,14 @@ fn read_solid(
             Err(Halt::Refused(refusal))
         }
         (Err(Halt::Refused(_)), ReadCheck::Fast) => geometry
-            .solid(model, p.solid, p.instance, options.heal, ReadCheck::Full, meter)
+            .solid(
+                model,
+                p.solid,
+                p.instance,
+                options.heal,
+                ReadCheck::Full,
+                meter,
+            )
             .map(|s| (s, ReadCheck::Full)),
         (first, _) => first.map(|s| (s, check)),
     }
@@ -892,6 +909,7 @@ fn imported(
             .filter_map(|f| map.faces.get(f).copied())
             .collect(),
         pinched: built.healing.pinched,
+        welded: built.healing.welded,
     };
     Ok((
         topology::Solid {

@@ -213,6 +213,67 @@ impl From<Refusal> for Halt {
 /// that returns refusals: [`Geometry::solid`] never returns it, because
 /// it reads the stop from the meter (`Meter::stopped`) and returns
 /// [`Halt::Interrupted`] in its place.
+/// Joins, in every face of `file`, two loops that pass through one vertex
+/// into one loop that passes through it twice: a hole whose rim touches
+/// the face's outer loop (or another hole's) at a point, as a hole tangent
+/// to a plate's edge is written. Each loop has the face on its left, so
+/// the second, walked whole from the shared vertex and back, spliced into
+/// the first where the first arrives there, has it on its left too. Two
+/// loops that touch are not a face's boundary the checker accepts; one
+/// loop that touches itself is.
+fn join_touching_loops(file: &mut FileSolid) {
+    let ends: Vec<(usize, usize)> = file.edges.iter().map(|e| (e.start, e.end)).collect();
+    for shell in &mut file.shells {
+        for face in &mut shell.faces {
+            join_loops(&ends, &mut face.bounds);
+        }
+    }
+}
+
+/// [`join_touching_loops`] on one face's `bounds`, the edges by their
+/// `(start, end)` vertices.
+fn join_loops(ends: &[(usize, usize)], bounds: &mut Vec<Bound>) {
+    let head = |s: &Step| {
+        if s.forward {
+            ends[s.edge].1
+        } else {
+            ends[s.edge].0
+        }
+    };
+    let tail = |s: &Step| {
+        if s.forward {
+            ends[s.edge].0
+        } else {
+            ends[s.edge].1
+        }
+    };
+    'again: loop {
+        let n = bounds.len();
+        for a in 0..n {
+            for b in a + 1..n {
+                let (Walk::Edges(first), Walk::Edges(second)) = (&bounds[a].walk, &bounds[b].walk)
+                else {
+                    continue;
+                };
+                let Some((i, j)) = first.iter().enumerate().find_map(|(i, x)| {
+                    let v = head(x);
+                    second.iter().position(|y| tail(y) == v).map(|j| (i, j))
+                }) else {
+                    continue;
+                };
+                let mut joined: Vec<Step> = first[..=i].to_vec();
+                joined.extend_from_slice(&second[j..]);
+                joined.extend_from_slice(&second[..j]);
+                joined.extend_from_slice(&first[i + 1..]);
+                bounds[a].walk = Walk::Edges(joined);
+                bounds.remove(b);
+                continue 'again;
+            }
+        }
+        return;
+    }
+}
+
 /// Splits every vertex of `file` whose link in a shell is two or more
 /// cycles — the faces around it forming separate fans that share no edge
 /// there — into one vertex per fan, all the file's one `VERTEX_POINT`:
@@ -248,10 +309,10 @@ fn unpinch(file: &mut FileSolid) -> Vec<u64> {
                             let out = steps[(i + 1) % steps.len()];
                             let e = &file.edges[into.edge];
                             let at = if into.forward { e.end } else { e.start };
-                            corners.entry(at).or_default().push((
-                                (into.edge, into.forward),
-                                (out.edge, !out.forward),
-                            ));
+                            corners
+                                .entry(at)
+                                .or_default()
+                                .push(((into.edge, into.forward), (out.edge, !out.forward)));
                         }
                     }
                     Walk::Vertex(v) => {
@@ -385,6 +446,90 @@ impl Geometry<'_> {
     /// which wins over whatever the code that saw it went on to do, since
     /// an attempt that falls back on another may have swallowed it. The
     /// model is then as it was.
+    /// Welds, in `file`, two vertices `tolerance` apart at most that the
+    /// file's topology says are one: the two ends of an edge that starts
+    /// and ends at one point (a closed edge — a circle, a hole's rim —
+    /// written with a `VERTEX_POINT` at each end), and the end of one edge
+    /// of a loop and the start of the next (a junction written with a
+    /// vertex for each edge). Either way the loop could not close. The
+    /// first vertex in the list stays; every use of the other moves to it.
+    /// Returns the welded-away vertices' file `#id`s, ascending.
+    fn weld_coincident(&self, file: &mut FileSolid, tolerance: f64) -> Result<Vec<u64>, Refusal> {
+        let mut into: BTreeMap<usize, usize> = BTreeMap::new();
+        fn root(into: &BTreeMap<usize, usize>, mut v: usize) -> usize {
+            while let Some(&w) = into.get(&v) {
+                v = w;
+            }
+            v
+        }
+        // The pairs the topology joins: each edge's ends, and each loop
+        // junction's.
+        let mut pairs: Vec<(usize, usize)> = file.edges.iter().map(|e| (e.start, e.end)).collect();
+        for shell in &file.shells {
+            for face in &shell.faces {
+                for bound in &face.bounds {
+                    if let Walk::Edges(steps) = &bound.walk {
+                        for (i, into) in steps.iter().enumerate() {
+                            let out = steps[(i + 1) % steps.len()];
+                            let (e, f) = (&file.edges[into.edge], &file.edges[out.edge]);
+                            let head = if into.forward { e.end } else { e.start };
+                            let tail = if out.forward { f.start } else { f.end };
+                            pairs.push((head, tail));
+                        }
+                    }
+                }
+            }
+        }
+        let mut points: BTreeMap<usize, Point3> = BTreeMap::new();
+        for (start, end) in pairs {
+            let (a, b) = (root(&into, start), root(&into, end));
+            if a == b {
+                continue;
+            }
+            for v in [a, b] {
+                if !points.contains_key(&v) {
+                    let id = file.vertices[v];
+                    let args = self.entities.record(id, id, "VERTEX_POINT")?;
+                    let p = self.units.point(&self.entities, id, args.reference(1)?)?;
+                    points.insert(v, p);
+                }
+            }
+            if (points[&a] - points[&b]).norm() <= tolerance {
+                into.insert(a.max(b), a.min(b));
+            }
+        }
+        if into.is_empty() {
+            return Ok(Vec::new());
+        }
+        let welded: BTreeSet<u64> = into.keys().map(|&v| file.vertices[v]).collect();
+        // Renumber the vertices that stay, in their order, and move every
+        // use to them.
+        let mut index = vec![usize::MAX; file.vertices.len()];
+        let mut kept = Vec::with_capacity(file.vertices.len() - into.len());
+        for v in 0..file.vertices.len() {
+            if !into.contains_key(&v) {
+                index[v] = kept.len();
+                kept.push(file.vertices[v]);
+            }
+        }
+        let new_of = |v: usize| index[root(&into, v)];
+        for edge in &mut file.edges {
+            edge.start = new_of(edge.start);
+            edge.end = new_of(edge.end);
+        }
+        for shell in &mut file.shells {
+            for face in &mut shell.faces {
+                for bound in &mut face.bounds {
+                    if let Walk::Vertex(v) = &mut bound.walk {
+                        *v = new_of(*v);
+                    }
+                }
+            }
+        }
+        file.vertices = kept;
+        Ok(welded.into_iter().collect())
+    }
+
     pub(crate) fn solid(
         &self,
         model: &mut Model,
@@ -395,12 +540,23 @@ impl Geometry<'_> {
         meter: &mut Meter<'_>,
     ) -> Result<Solid, Halt> {
         let mut file = self.file_solid(solid)?;
-        // A vertex where separate parts of a shell touch is split, one per
-        // fan, by a healing read; one that does not heal leaves it, and the
-        // builder refuses the shell as not a closed surface.
-        let pinched = match (heal, file.kind) {
-            (Heal::GapsAndOrientation, BodyKind::Solid) => unpinch(&mut file),
-            _ => Vec::new(),
+        // A healing read welds the two vertices of an edge that start and
+        // end at one point — a closed edge written with two `VERTEX_POINT`s —
+        // and then splits a vertex where separate parts of a shell touch,
+        // one per fan. A read that does not heal leaves both, and the
+        // builder refuses the shell: an open loop, or not a closed surface.
+        let (welded, pinched) = match heal {
+            Heal::GapsAndOrientation => {
+                let welded =
+                    self.weld_coincident(&mut file, model.precision().default_tolerance)?;
+                join_touching_loops(&mut file);
+                let pinched = match file.kind {
+                    BodyKind::Solid => unpinch(&mut file),
+                    _ => Vec::new(),
+                };
+                (welded, pinched)
+            }
+            Heal::Off => (Vec::new(), Vec::new()),
         };
         // A solid's voids are checked once built: a void shell encloses
         // negative volume. One that encloses positive volume was written
@@ -425,8 +581,10 @@ impl Geometry<'_> {
                         if heal == Heal::Off {
                             // Not healing: refused, never a body whose voids add
                             // to its volume.
-                            let ids: Vec<String> =
-                                found.iter().map(|&si| format!("#{}", file.shells[si].id)).collect();
+                            let ids: Vec<String> = found
+                                .iter()
+                                .map(|&si| format!("#{}", file.shells[si].id))
+                                .collect();
                             return Err(Attempt::Halt(Halt::Refused(Refusal::Topology {
                                 entity: solid,
                                 what: format!(
@@ -438,13 +596,17 @@ impl Geometry<'_> {
                         return Err(Attempt::TurnVoids);
                     }
                 } else if !first {
-                    built.healing.turned.extend(shell_faces(m, built.body, &inside_out));
+                    built
+                        .healing
+                        .turned
+                        .extend(shell_faces(m, built.body, &inside_out));
                 }
                 Ok(built)
             });
             match attempt {
                 Ok(mut built) => {
                     built.healing.pinched = pinched;
+                    built.healing.welded = welded;
                     return Ok(built);
                 }
                 Err(Attempt::Halt(halt)) => return Err(halt),
@@ -1604,9 +1766,10 @@ impl Gaps {
                         ts.sort_by(f64::total_cmp);
                         ts.dedup();
                     }
-                    let worst = worst_gap_or_sampled(&ts, precision.default_tolerance, !self.fast, |t| {
-                        distance(image(t), c.point(t))
-                    });
+                    let worst =
+                        worst_gap_or_sampled(&ts, precision.default_tolerance, !self.fast, |t| {
+                            distance(image(t), c.point(t))
+                        });
                     self.raise_edge(key, worst);
                 }
                 None => {
@@ -2471,6 +2634,54 @@ fn loop_box(uses: &[Use]) -> [[f64; 2]; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hole_touching_the_outer_loop_is_joined_into_it() {
+        // A square 0-1-2-3 and a hole, one closed edge 4 at vertex 1.
+        let ends = [(0, 1), (1, 2), (2, 3), (3, 0), (1, 1)];
+        let step = |edge, forward| Step { edge, forward };
+        let mut bounds = vec![
+            Bound {
+                id: 10,
+                walk: Walk::Edges((0..4).map(|e| step(e, true)).collect()),
+            },
+            Bound {
+                id: 11,
+                walk: Walk::Edges(vec![step(4, false)]),
+            },
+        ];
+        join_loops(&ends, &mut bounds);
+        assert_eq!(bounds.len(), 1);
+        let Walk::Edges(steps) = &bounds[0].walk else {
+            panic!()
+        };
+        let order: Vec<(usize, bool)> = steps.iter().map(|s| (s.edge, s.forward)).collect();
+        assert_eq!(
+            order,
+            [(0, true), (4, false), (1, true), (2, true), (3, true)]
+        );
+    }
+
+    #[test]
+    fn loops_that_do_not_touch_are_left_apart() {
+        let ends = [(0, 1), (1, 2), (2, 0), (3, 3)];
+        let step = |edge| Step {
+            edge,
+            forward: true,
+        };
+        let mut bounds = vec![
+            Bound {
+                id: 10,
+                walk: Walk::Edges((0..3).map(step).collect()),
+            },
+            Bound {
+                id: 11,
+                walk: Walk::Edges(vec![step(3)]),
+            },
+        ];
+        join_loops(&ends, &mut bounds);
+        assert_eq!(bounds.len(), 2);
+    }
 
     #[test]
     fn a_pcurve_past_a_nurbs_domain_is_held_inside_it() {

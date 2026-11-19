@@ -20,9 +20,18 @@ fn file() -> String {
     let mut m = Model::default();
     let bodies = [
         sample::cylinder(&mut m, 4.0, 12.0).unwrap(),
-        sample::cuboid(&mut m, Point3::new(10.0, 0.0, 0.0), Point3::new(14.0, 3.0, 2.0)).unwrap(),
-        sample::cuboid_nurbs(&mut m, Point3::new(-9.0, -2.0, 0.0), Point3::new(-5.0, 2.0, 3.0))
-            .unwrap(),
+        sample::cuboid(
+            &mut m,
+            Point3::new(10.0, 0.0, 0.0),
+            Point3::new(14.0, 3.0, 2.0),
+        )
+        .unwrap(),
+        sample::cuboid_nurbs(
+            &mut m,
+            Point3::new(-9.0, -2.0, 0.0),
+            Point3::new(-5.0, 2.0, 3.0),
+        )
+        .unwrap(),
         sample::sphere(&mut m, Point3::new(0.0, 20.0, 0.0), 3.0).unwrap(),
     ];
     step::write(&m, &bodies).unwrap()
@@ -62,11 +71,24 @@ fn a_parallel_read_reads_what_a_sequential_one_does() {
     for (p, s) in parallel.solids.iter().zip(&sequential.solids) {
         assert_eq!(p.entity, s.entity, "the file's order of solids");
     }
-    for (p, s) in summary(&pm, &parallel).into_iter().zip(summary(&sm, &sequential)) {
+    for (p, s) in summary(&pm, &parallel)
+        .into_iter()
+        .zip(summary(&sm, &sequential))
+    {
         // The measures to rounding: an imported body's vertices may be
         // listed in another order, which a sum over them rounds by.
-        assert!((p.0 - s.0).abs() <= 1e-12 * s.0, "volume {} against {}", p.0, s.0);
-        assert!((p.1 - s.1).abs() <= 1e-12 * s.1, "area {} against {}", p.1, s.1);
+        assert!(
+            (p.0 - s.0).abs() <= 1e-12 * s.0,
+            "volume {} against {}",
+            p.0,
+            s.0
+        );
+        assert!(
+            (p.1 - s.1).abs() <= 1e-12 * s.1,
+            "area {} against {}",
+            p.1,
+            s.1
+        );
         assert_eq!(p.2, s.2, "the file entities its faces came from");
         assert_eq!(p.3, s.3, "the faces healing turned");
     }
