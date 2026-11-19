@@ -84,7 +84,11 @@ impl PartialEq for PatchCache {
 
 impl core::fmt::Debug for PatchCache {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(if self.0.get().is_some() { "PatchCache(filled)" } else { "PatchCache(empty)" })
+        f.write_str(if self.0.get().is_some() {
+            "PatchCache(filled)"
+        } else {
+            "PatchCache(empty)"
+        })
     }
 }
 

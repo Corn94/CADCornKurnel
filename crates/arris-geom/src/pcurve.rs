@@ -285,14 +285,16 @@ pub fn pcurve_on(
             // globally.
             let mut fault = None;
             let hint = core::cell::Cell::new(None);
-            check_on(curve, range, surface, tol, |p| match nurbs.project_near(p, hint.get(), tol.linear) {
-                Ok(near) => {
-                    hint.set(Some(near.uv));
-                    near.distance
-                }
-                Err(e) => {
-                    fault.get_or_insert(e);
-                    f64::NAN
+            check_on(curve, range, surface, tol, |p| {
+                match nurbs.project_near(p, hint.get(), tol.linear) {
+                    Ok(near) => {
+                        hint.set(Some(near.uv));
+                        near.distance
+                    }
+                    Err(e) => {
+                        fault.get_or_insert(e);
+                        f64::NAN
+                    }
                 }
             })
             .map_err(|e| fault.take().unwrap_or(e))?;

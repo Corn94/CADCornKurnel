@@ -584,11 +584,10 @@ impl Geometry<'_> {
                 continue;
             }
             for v in [a, b] {
-                if !points.contains_key(&v) {
+                if let std::collections::btree_map::Entry::Vacant(slot) = points.entry(v) {
                     let id = file.vertices[v];
                     let args = self.entities.record(id, id, "VERTEX_POINT")?;
-                    let p = self.units.point(&self.entities, id, args.reference(1)?)?;
-                    points.insert(v, p);
+                    slot.insert(self.units.point(&self.entities, id, args.reference(1)?)?);
                 }
             }
             if (points[&a] - points[&b]).norm() <= tolerance {
@@ -603,9 +602,9 @@ impl Geometry<'_> {
         // use to them.
         let mut index = vec![usize::MAX; file.vertices.len()];
         let mut kept = Vec::with_capacity(file.vertices.len() - into.len());
-        for v in 0..file.vertices.len() {
+        for (v, slot) in index.iter_mut().enumerate() {
             if !into.contains_key(&v) {
-                index[v] = kept.len();
+                *slot = kept.len();
                 kept.push(file.vertices[v]);
             }
         }
@@ -627,6 +626,7 @@ impl Geometry<'_> {
         Ok(welded.into_iter().collect())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn solid(
         &self,
         model: &mut Model,

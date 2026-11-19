@@ -370,7 +370,7 @@ impl NurbsCurve {
             return Err(fail(SplineFault::InsertedKnotMissing));
         };
         let gap = (seam_end - seam_start).norm();
-        if !(gap <= closure) {
+        if gap.is_nan() || gap > closure {
             return Err(fail(SplineFault::NotClosed { gap }));
         }
         // A rational curve is unchanged by scaling all its weights: scale

@@ -119,8 +119,14 @@ struct IndexNode {
 
 enum IndexKind {
     /// `order[start..end]`.
-    Leaf { start: usize, end: usize },
-    Inner { left: usize, right: usize },
+    Leaf {
+        start: usize,
+        end: usize,
+    },
+    Inner {
+        left: usize,
+        right: usize,
+    },
 }
 
 /// How many patches a leaf of [`PatchIndex`] holds at most.
@@ -165,7 +171,8 @@ impl PatchIndex {
                 .max_by(|&a, &b| (hull[1][a] - hull[0][a]).total_cmp(&(hull[1][b] - hull[0][b])))
                 .unwrap_or(0);
             let centre = |i: usize| hulls[i][0][axis] + hulls[i][1][axis];
-            self.order[start..end].sort_by(|&a, &b| centre(a).total_cmp(&centre(b)).then(a.cmp(&b)));
+            self.order[start..end]
+                .sort_by(|&a, &b| centre(a).total_cmp(&centre(b)).then(a.cmp(&b)));
             let mid = start + (end - start) / 2;
             let left = self.node(hulls, start, mid);
             let right = self.node(hulls, mid, end);
@@ -225,7 +232,8 @@ impl PatchIndex {
             }
             match node.kind {
                 IndexKind::Leaf { start, end } => out.extend(
-                    (self.order[start..end].iter()).filter(|&&i| box_distance(&patches[i].hull, p) <= reach),
+                    (self.order[start..end].iter())
+                        .filter(|&&i| box_distance(&patches[i].hull, p) <= reach),
                 ),
                 IndexKind::Inner { left, right } => stack.extend([left, right]),
             }
@@ -483,7 +491,11 @@ impl NurbsSurface {
                     let [u, v] = patch.middle();
                     let middle = self.eval(u, v).point;
                     let hull = patch.hull_box();
-                    CachedPatch { patch, middle, hull }
+                    CachedPatch {
+                        patch,
+                        middle,
+                        hull,
+                    }
                 })
                 .collect();
             let mut lo = [f64::INFINITY; 3];

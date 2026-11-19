@@ -92,6 +92,7 @@ struct Build<'a, 'm> {
 
 impl Geometry<'_> {
     /// The body of `file`, appended to `model`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn build(
         &self,
         model: &mut Model,
