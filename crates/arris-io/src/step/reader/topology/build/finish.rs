@@ -46,6 +46,7 @@ impl Build<'_, '_> {
                         built.faces.get(slot).copied()
                     })
                     .collect(),
+                pinched: Vec::new(),
             },
         })
     }

@@ -147,6 +147,12 @@ pub struct Healing {
     pub grown: Vec<Grown>,
     /// Every face the read turned.
     pub turned: Vec<FaceId>,
+    /// Every `VERTEX_POINT` (its file `#id`) where separate parts of a
+    /// shell touch at that one point — the faces around it forming two or
+    /// more fans that share no edge there — split into one vertex per fan,
+    /// all at the file's point: what a weldment's members touching at a
+    /// corner export as. Nothing moved; the shell becomes a manifold one.
+    pub pinched: Vec<u64>,
 }
 
 impl Healing {
@@ -158,7 +164,7 @@ impl Healing {
     /// assert!(Healing::default().is_empty());
     /// ```
     pub fn is_empty(&self) -> bool {
-        self.grown.is_empty() && self.turned.is_empty()
+        self.grown.is_empty() && self.turned.is_empty() && self.pinched.is_empty()
     }
 }
 
@@ -885,6 +891,7 @@ fn imported(
         turned: (built.healing.turned.iter())
             .filter_map(|f| map.faces.get(f).copied())
             .collect(),
+        pinched: built.healing.pinched,
     };
     Ok((
         topology::Solid {

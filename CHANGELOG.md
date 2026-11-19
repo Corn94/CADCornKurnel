@@ -57,6 +57,16 @@ into its version (ADR-0027).
 - **Breaking**: `ReadOptions` has the fields `check` and `check_for`, and
   `ReadBody` the field `check`. Fix: a `ReadOptions { .. }` literal ends in
   `..ReadOptions::default()`; a `ReadBody` literal adds `check`.
+- A solid whose shell touches itself at a vertex — every edge used twice,
+  but the faces round one `VERTEX_POINT` forming two or more fans that
+  share no edge there, as SOLIDWORKS and Inventor export weldment members
+  and bodies touching at a corner — is read by a healing read with the
+  vertex split, one per fan, all at the file's point; the vertex is named
+  in `Healing::pinched` (new). The fans are found from the loops' corners.
+  A read with `Heal::Off` refuses the shell, as before, as not a closed
+  surface. Such solids were refused as non-manifold.
+- **Breaking**: `Healing` has the field `pinched`. Fix: a `Healing`
+  literal adds `pinched: Vec::new()`.
 
 ## 0.11.1 — 2026-11-16
 

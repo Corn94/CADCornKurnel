@@ -213,6 +213,98 @@ impl From<Refusal> for Halt {
 /// that returns refusals: [`Geometry::solid`] never returns it, because
 /// it reads the stop from the meter (`Meter::stopped`) and returns
 /// [`Halt::Interrupted`] in its place.
+/// Splits every vertex of `file` whose link in a shell is two or more
+/// cycles — the faces around it forming separate fans that share no edge
+/// there — into one vertex per fan, all the file's one `VERTEX_POINT`:
+/// the first fan keeps the vertex, each other one's edge ends move to a
+/// copy. The fans are found from the loops' corners, not their faces, so
+/// a face whose loop passes through the vertex twice joins nothing it
+/// should not. A vertex a `VERTEX_LOOP` bounds (an apex, a pole) is left
+/// alone, since such a face has no corner there to place it in a fan.
+/// Returns the split vertices' file `#id`s, ascending.
+fn unpinch(file: &mut FileSolid) -> Vec<u64> {
+    // An edge end: the edge, and its end (`true`) or start (`false`).
+    type End = (usize, bool);
+    fn root(parent: &mut BTreeMap<End, End>, x: End) -> End {
+        let p = *parent.entry(x).or_insert(x);
+        if p == x {
+            return x;
+        }
+        let r = root(parent, p);
+        parent.insert(x, r);
+        r
+    }
+    let mut pinched = BTreeSet::new();
+    for shell in &file.shells {
+        // Every corner of every loop, by the vertex it turns at, and every
+        // vertex a vertex loop bounds.
+        let mut corners: BTreeMap<usize, Vec<(End, End)>> = BTreeMap::new();
+        let mut looped: BTreeSet<usize> = BTreeSet::new();
+        for face in &shell.faces {
+            for bound in &face.bounds {
+                match &bound.walk {
+                    Walk::Edges(steps) => {
+                        for (i, into) in steps.iter().enumerate() {
+                            let out = steps[(i + 1) % steps.len()];
+                            let e = &file.edges[into.edge];
+                            let at = if into.forward { e.end } else { e.start };
+                            corners.entry(at).or_default().push((
+                                (into.edge, into.forward),
+                                (out.edge, !out.forward),
+                            ));
+                        }
+                    }
+                    Walk::Vertex(v) => {
+                        looped.insert(*v);
+                    }
+                }
+            }
+        }
+        for (v, arcs) in corners {
+            if looped.contains(&v) {
+                continue;
+            }
+            let mut parent: BTreeMap<End, End> = BTreeMap::new();
+            for &(a, b) in &arcs {
+                let (ra, rb) = (root(&mut parent, a), root(&mut parent, b));
+                if ra != rb {
+                    parent.insert(ra.max(rb), ra.min(rb));
+                }
+            }
+            // The fans in order of their least edge end, the first keeping
+            // the vertex.
+            let ends: Vec<End> = parent.keys().copied().collect();
+            let mut fans: Vec<End> = Vec::new();
+            for &x in &ends {
+                let r = root(&mut parent, x);
+                if !fans.contains(&r) {
+                    fans.push(r);
+                }
+            }
+            if fans.len() < 2 {
+                continue;
+            }
+            pinched.insert(file.vertices[v]);
+            for &fan in &fans[1..] {
+                let copy = file.vertices.len();
+                file.vertices.push(file.vertices[v]);
+                for &(edge, end) in &ends {
+                    if root(&mut parent, (edge, end)) != fan {
+                        continue;
+                    }
+                    let edge = &mut file.edges[edge];
+                    if end {
+                        edge.end = copy;
+                    } else {
+                        edge.start = copy;
+                    }
+                }
+            }
+        }
+    }
+    pinched.into_iter().collect()
+}
+
 /// One build of a solid: done, halted, or to be built again with its
 /// inside-out voids turned.
 enum Attempt {
@@ -303,6 +395,13 @@ impl Geometry<'_> {
         meter: &mut Meter<'_>,
     ) -> Result<Solid, Halt> {
         let mut file = self.file_solid(solid)?;
+        // A vertex where separate parts of a shell touch is split, one per
+        // fan, by a healing read; one that does not heal leaves it, and the
+        // builder refuses the shell as not a closed surface.
+        let pinched = match (heal, file.kind) {
+            (Heal::GapsAndOrientation, BodyKind::Solid) => unpinch(&mut file),
+            _ => Vec::new(),
+        };
         // A solid's voids are checked once built: a void shell encloses
         // negative volume. One that encloses positive volume was written
         // inside out — its faces already facing into the void and its
@@ -344,7 +443,10 @@ impl Geometry<'_> {
                 Ok(built)
             });
             match attempt {
-                Ok(built) => return Ok(built),
+                Ok(mut built) => {
+                    built.healing.pinched = pinched;
+                    return Ok(built);
+                }
                 Err(Attempt::Halt(halt)) => return Err(halt),
                 Err(Attempt::TurnVoids) => {
                     for &si in &found {
